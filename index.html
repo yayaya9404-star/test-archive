@@ -237,8 +237,12 @@ async function loadLibrary(){
 }
 function libById(id){ return id ? library.find(l=>l.id===id) : null; }
 function libBooks(cat){ return [...new Set(library.filter(l=>l.category===cat).map(l=>l.book))].sort((a,b)=>a.localeCompare(b,'ko',{numeric:true})); }
-function libLessons(cat, book){ return library.filter(l=>l.category===cat && l.book===book); }
-function libFind(cat, book, lesson){ return library.find(l=>l.category===cat && l.book===book && l.lesson===lesson) || null; }
+// 레슨은 숫자 순서대로 (Chapter 1-3, 4-5, 6-7, 8-10 …) — 올린 순서와 상관없이
+function libLessons(cat, book){
+  return library.filter(l=>l.category===cat && l.book===book && l.lesson!=='')   // 빈 레슨 = 교재 자리표시
+    .sort((a,b)=>a.lesson.localeCompare(b.lesson, 'ko', {numeric:true, sensitivity:'base'}));
+}
+function libFind(cat, book, lesson){ return lesson ? (library.find(l=>l.category===cat && l.book===book && l.lesson===lesson) || null) : null; }
 
 // ---------- 학기 ----------
 async function loadSettings(){
@@ -730,6 +734,7 @@ function openLibrary(book){
     <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
       <select onchange="openLibrary(this.value)"><option value="">전체 교재</option>${allBooks(cat).map(b=>`<option ${b===libFilter?'selected':''}>${esc(b)}</option>`).join('')}</select>
       <span class="spacer"></span>
+      <button class="sm" onclick="openAddBooks()">📋 교재 여러 개 붙여넣기</button>
       <button class="sm" onclick="openAddLessons('')">＋ 교재 추가</button>
       <button class="primary sm" onclick="openBulk()">📤 여러 파일 한 번에 올리기</button>
     </div>
@@ -753,6 +758,34 @@ function openAddLessons(book){
       <button class="sm" onclick="fillLessonRange()">채우기</button>
     </div>
     <div class="btns"><button onclick="openLibrary()">뒤로</button><button class="primary" onclick="saveLessons()">추가</button></div>`);
+}
+// 교재 목록 붙여넣기: 'DSC1_01.Goldilocks…' → 'Goldilocks…' (레벨·번호 떼기)
+function cleanBookTitle(s){
+  return String(s||'').replace(/​/g,'')
+    .replace(/^[A-Za-z]{2,4}\d?\s*_\s*(\d+\s*[._]\s*)?/, '')
+    .replace(/[′’‘`]/g, "'").replace(/\s+/g,' ').trim();
+}
+function openAddBooks(){
+  showModal(`
+    <h2>📋 ${CAT_LABEL[tab]} 교재 여러 개 붙여넣기</h2>
+    <div class="desc">엑셀에서 교재 칸을 복사해서 붙여넣으세요. 앞의 레벨·번호(예: <b>DSC1_01.</b>)는 자동으로 떼고 제목만 올라가요.</div>
+    <textarea id="ab_text" rows="10" oninput="previewBooks()" placeholder="DSC1_01.Goldilocks and the Three Bears&#10;DSC1_02.The Frog Prince"></textarea>
+    <div class="hint" id="ab_prev"></div>
+    <div class="btns"><button onclick="openLibrary()">뒤로</button><button class="primary" onclick="saveBooks()">올리기</button></div>`, true);
+}
+function bookList(){ return [...new Set($('ab_text').value.split(/\r?\n/).map(cleanBookTitle).filter(Boolean))]; }
+function previewBooks(){
+  const l = bookList(), have = new Set(libBooks(tab));
+  const nw = l.filter(b=>!have.has(b));
+  $('ab_prev').innerHTML = l.length ? `${l.length}개 인식 · 새로 추가 ${nw.length}개<br>${l.slice(0,8).map(esc).join(' / ')}${l.length>8?' …':''}` : '';
+}
+async function saveBooks(){
+  const l = bookList();
+  if(!l.length) return toast('교재를 붙여넣어 주세요', true);
+  const { data, error } = await sb.rpc('exam_lib_add_books', {p_pw:adminPw, p_category:tab, p_books:l});
+  if(error) return toast('올리기 실패: '+errMsg(error), true);
+  toast(`교재 ${data}개 추가${data<l.length?' (이미 있는 건 건너뜀)':''}`);
+  await loadLibrary(); openLibrary('');
 }
 function fillLessonRange(){
   const p=$('al_pre').value, a=parseInt($('al_from').value,10), b=parseInt($('al_to').value,10), pair=$('al_pair').checked;
