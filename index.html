@@ -754,6 +754,7 @@ function openLibrary(book){
     <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
       <select onchange="openLibrary(this.value)"><option value="">전체 교재</option>${allBooks(cat).map(b=>`<option ${b===libFilter?'selected':''}>${esc(b)}</option>`).join('')}</select>
       <span class="spacer"></span>
+      ${BOOK_ONLY(cat)?`<button class="sm" onclick="openCombo()">🔗 두 권 묶어서 시험 만들기</button>`:''}
       <button class="sm" onclick="openAddBooks()">📋 교재 여러 개 붙여넣기</button>
       ${BOOK_ONLY(cat)?'':`<button class="sm" onclick="openAddLessons('')">＋ 교재 추가</button>`}
       <button class="primary sm" onclick="openBulk()">📤 여러 파일 한 번에 올리기</button>
@@ -761,6 +762,31 @@ function openLibrary(book){
     ${body}
     <div class="btns"><button onclick="closeModal()">닫기</button></div>`, true);
 }
+// CHAT 낱권 목록 (묶음 제외) — 두 권 고를 때 씀
+const COMBO_SEP = ' + ';
+function singleBooks(){ return libBooks('chat').filter(b=>!b.includes(COMBO_SEP)); }
+function bookPickHTML(id, val, onchg){
+  return `<select id="${id}" onchange="${onchg||''}"><option value="">책 선택</option>${singleBooks().map(b=>`<option ${b===val?'selected':''}>${esc(b)}</option>`).join('')}</select>`;
+}
+function openCombo(){
+  showModal(`
+    <h2>🔗 두 권 묶어서 시험 만들기</h2>
+    <div class="desc">DSC1·DSC2처럼 책 두 권을 한 시험으로 보는 경우예요. 두 권을 고르면 묶음 시험이 만들어지고, 바로 시험지를 올릴 수 있어요.</div>
+    <div class="form">
+      <label>첫 번째 책</label>${bookPickHTML('cb_a','',"comboPrev()")}
+      <label>두 번째 책</label>${bookPickHTML('cb_b','',"comboPrev()")}
+    </div>
+    <div class="hint" id="cb_prev"></div>
+    <div class="btns"><button onclick="openLibrary()">뒤로</button><button class="primary" onclick="saveCombo()">만들고 시험지 올리기</button></div>`);
+}
+function comboName(){ const a=fval('cb_a'), b=fval('cb_b'); return a && b && a!==b ? a+COMBO_SEP+b : ''; }
+function comboPrev(){ const n=comboName(); $('cb_prev').innerHTML = n ? `만들어질 이름: <b>${esc(n)}</b>${bookRow('chat',n)?' (이미 있어요 — 그 시험으로 열려요)':''}` : ''; }
+async function saveCombo(){
+  const n = comboName();
+  if(!n) return toast('서로 다른 책 두 권을 골라주세요', true);
+  await openBookItem(n);
+}
+
 // CHAT 교재 열기 (자리표시 줄이 없던 교재면 만들고 열기)
 async function openBookItem(book){
   let r = bookRow(tab, book);
@@ -838,7 +864,7 @@ async function saveLessons(){
 
 // ---------- 여러 파일 한 번에 올리기 ----------
 let bulk = [];   // {file, book, key('id' | 'new'), newName, kind('main'|'retest'|'skip'), msg}
-const normName = s => String(s||'').toLowerCase().replace(/\.pdf$/,'').replace(/[\s_\-.,()\[\]{}~&+]/g,'');
+const normName = s => String(s||'').toLowerCase().replace(/\.pdf$/,'').replace(/[^a-z0-9가-힣]/g,'');   // 띄어쓰기·따옴표·기호 무시
 // 'Chapter 5-6', 'Ch56', 'Unit 1-2', 'L13-14' → 숫자 배열
 function nums(s, needPrefix){
   const m = String(s).match(/(?:chapter|ch|lesson|les|unit|u|l)[\s._\-]*(\d[\d\s,\-~&_.+]*)/i);
@@ -889,7 +915,14 @@ function addBulkFiles(files){
     if(!/\.pdf$/i.test(f.name) && f.type!=='application/pdf') continue;
     let book = guessBook(f.name); const g = guessLesson(f.name, book);
     const r = { file:f, book, key:g.key, newName:g.newName, kind:guessKind(f.name), msg:'', newBook:'' };
-    if(BOOK_ONLY(tab) && !book){ r.book='__new'; r.newBook=titleFromFile(f.name); }
+    if(BOOK_ONLY(tab) && !book.includes(COMBO_SEP)){
+      // 파일 이름에 책 제목이 두 개 있으면 → 두 권 묶기 자동 선택 (파일 이름에 나온 순서대로)
+      const n = normName(f.name);
+      const two = singleBooks().filter(b=>normName(b) && n.includes(normName(b)))
+        .sort((a,b)=>n.indexOf(normName(a))-n.indexOf(normName(b)));
+      if(two.length >= 2){ r.book='__combo'; r.ca=two[0]; r.cb=two[1]; }
+      else if(!book){ r.book='__new'; r.newBook=titleFromFile(f.name); }
+    }
     bulk.push(r);
   }
   renderBulk();
@@ -900,11 +933,17 @@ function titleFromFile(n){
     .replace(/\b(chat|test|본시험지?|재시험지?|재시|[12]차)\b/gi,'').replace(/\s+/g,' '));
 }
 function bulkSetBook(i, v){ const r=bulk[i]; r.book=v; if(v==='__new' && !r.newBook) r.newBook=titleFromFile(r.file.name); Object.assign(r, guessLesson(r.file.name, v)); renderBulk(); }
+// CHAT 줄의 실제 교재 이름 (새 교재 / 두 권 묶기 포함)
+function bulkBookName(r){
+  if(r.book==='__new') return (r.newBook||'').trim();
+  if(r.book==='__combo') return r.ca && r.cb && r.ca!==r.cb ? r.ca+COMBO_SEP+r.cb : '';
+  return r.book;
+}
 function bulkSetAllBooks(v){ if(!v) return; bulk.forEach((r,i)=>{ r.book=v; Object.assign(r, guessLesson(r.file.name, v)); }); renderBulk(); }
 function renderBulk(){
   const books = allBooks(tab);
   const chat = BOOK_ONLY(tab);
-  const bookName = r => r.book==='__new' ? r.newBook.trim() : r.book;
+  const bookName = bulkBookName;
   const target = r => chat ? bookName(r)+'|'+r.kind : r.key==='new' ? r.book+'|'+r.newName.trim()+'|'+r.kind : r.key+'|'+r.kind;
   const count = {}; bulk.forEach(r=>{ if(r.kind!=='skip') count[target(r)]=(count[target(r)]||0)+1; });
   const ready = bulk.filter(r=>bulkReady(r)).length;
@@ -921,7 +960,8 @@ function renderBulk(){
         const dup = r.kind!=='skip' && count[target(r)]>1;
         return `<tr>
           <td title="${esc(r.file.name)}" style="word-break:break-all">${esc(r.file.name)}</td>
-          <td><select onchange="bulkSetBook(${i},this.value)"><option value="">교재 선택</option>${[...new Set([r.book,...books])].filter(Boolean).map(b=>`<option ${b===r.book?'selected':''}>${esc(b)}</option>`).join('')}${chat?`<option value="__new" ${r.book==='__new'?'selected':''}>＋ 새 교재</option>`:''}</select>
+          <td><select onchange="bulkSetBook(${i},this.value)"><option value="">교재 선택</option>${[...new Set([r.book,...books])].filter(Boolean).map(b=>`<option ${b===r.book?'selected':''}>${esc(b)}</option>`).join('')}${chat?`<option value="__combo" ${r.book==='__combo'?'selected':''}>🔗 두 권 묶기</option><option value="__new" ${r.book==='__new'?'selected':''}>＋ 새 교재</option>`:''}</select>
+              ${chat && r.book==='__combo'?`<div style="display:flex;flex-direction:column;gap:3px;margin-top:3px">${bookPickHTML('bk_a'+i, r.ca, `bulk[${i}].ca=this.value;renderBulk()`)}${bookPickHTML('bk_b'+i, r.cb, `bulk[${i}].cb=this.value;renderBulk()`)}</div>`:''}
               ${chat && r.book==='__new'?`<input value="${esc(r.newBook)}" oninput="bulk[${i}].newBook=this.value" onchange="renderBulk()" placeholder="새 교재(시험) 이름" style="margin-top:3px">`:''}</td>
           ${chat?'':`<td><select onchange="bulk[${i}].key=this.value;renderBulk()" ${r.book?'':'disabled'}>
                 <option value="">선택</option>${ls.map(l=>`<option value="${l.id}" ${String(l.id)===r.key?'selected':''}>${esc(l.lesson)}${(r.kind==='main'?l.main_file:l.retest_file)?' (교체)':''}</option>`).join('')}
@@ -939,7 +979,7 @@ function renderBulk(){
 }
 function bulkReady(r){
   if(r.kind==='skip' || !r.book) return false;
-  if(BOOK_ONLY(tab)) return r.book!=='__new' || !!r.newBook.trim();
+  if(BOOK_ONLY(tab)) return !!bulkBookName(r);
   return !!r.key && (r.key!=='new' || !!r.newName.trim());
 }
 async function runBulk(){
@@ -947,10 +987,10 @@ async function runBulk(){
   const rows = bulk.filter(bulkReady);
   if(BOOK_ONLY(tab)){
     // CHAT: 교재(시험) 자리 먼저 만들기 (이미 있으면 건너뜀)
-    const names = [...new Set(rows.map(r=>r.book==='__new' ? r.newBook.trim() : r.book))];
+    const names = [...new Set(rows.map(bulkBookName))];
     const { error } = await sb.rpc('exam_lib_add_books', {p_pw:adminPw, p_category:tab, p_books:names});
     if(error){ go.disabled=false; return toast('교재 만들기 실패: '+errMsg(error), true); }
-    rows.forEach(r=>{ if(r.book==='__new'){ r.book = r.newBook.trim(); } });
+    rows.forEach(r=>{ r.book = bulkBookName(r); });
   }
   // 1) 새 레슨 먼저 만들기 (교재별로)
   const add = {};
