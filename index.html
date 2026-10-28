@@ -146,8 +146,8 @@ select:disabled{background:#f4f5f7;color:#9aa1ad}
 
 <script>
 // ====== 설정: 기존 Supabase 프로젝트 정보 입력 ======
-const SUPABASE_URL = 'https://YOUR-PROJECT.supabase.co';
-const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
+const SUPABASE_URL = 'https://utidzfdezgjgyawjfnnd.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV0aWR6ZmRlemdqZ3lhd2pmbm5kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxMjEzNDYsImV4cCI6MjEwNDY5NzM0Nn0.Qx9mcGc6VI54Vit6T5nzATAsCJXhj5qIYd0A8fqoOwo';
 // ===================================================
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -453,7 +453,8 @@ function toggleAdmin(){
 async function adminLogin(){
   const pw = $('a_pw').value;
   const { data, error } = await sb.rpc('exam_check_admin', {p_pw:pw});
-  if(error || !data) return toast('비밀번호가 틀렸어요', true);
+  if(error) return toast('서버 오류: '+errMsg(error)+' (SQL 설치를 확인하세요)', true);
+  if(!data) return toast('비밀번호가 틀렸어요', true);
   adminPw = pw; closeModal(); updateAdminUI(); render(); renderJobs(); toast('관리자 모드');
 }
 function updateAdminUI(){
