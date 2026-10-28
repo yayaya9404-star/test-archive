@@ -6,6 +6,8 @@
 <title>시험지 인쇄 관리</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 :root{
   --bg:#f5f6f8; --card:#fff; --line:#e3e6eb; --text:#1d2330; --sub:#6b7383;
@@ -99,7 +101,6 @@ select:disabled{background:#f4f5f7;color:#9aa1ad}
 
 <header>
   <h1>📄 시험지 인쇄 관리</h1>
-  <span id="agent" class="agent">인쇄 PC 확인 중…</span>
   <span class="spacer"></span>
   <select id="semSel" onchange="setSem(this.value)" title="학기 선택"></select>
   <button id="adminBtn" onclick="toggleAdmin()">🔒 관리자</button>
@@ -134,11 +135,6 @@ select:disabled{background:#f4f5f7;color:#9aa1ad}
       <tbody id="tbody"></tbody>
     </table>
   </div>
-
-  <div class="jobs">
-    <h3>최근 인쇄 작업</h3>
-    <div id="jobs"></div>
-  </div>
 </main>
 
 <div class="modal-bg" id="modalBg" onclick="if(event.target===this)closeModal()"><div class="modal" id="modal"></div></div>
@@ -157,7 +153,6 @@ const BOOK_LABEL = {chat:'Story Book', munin:'문법교재'};
 
 let tab = 'munin';
 let papers = [];
-let jobs = [];
 let adminPw = null;     // 확인된 관리자 비번 (새로고침하면 사라짐)
 let sortAsc = true;
 let semesters = [], classes = [], levelBooks = [];
@@ -180,27 +175,60 @@ async function loadPapers(){
   papers = data || [];
   render();
 }
-async function loadJobs(){
-  const { data } = await sb.from('exam_print_jobs').select('*').order('id',{ascending:false}).limit(15);
-  const prev = JSON.stringify(jobs.map(j=>[j.id,j.status]));
-  jobs = data || [];
-  renderJobs();
-  // 작업 상태가 바뀌면 시험 상태(준비완료 등)도 다시 불러오기
-  if(prev !== JSON.stringify(jobs.map(j=>[j.id,j.status]))) loadPapers();
+
+// ---------- PDF 만들기 · 인쇄창 ----------
+const MM = 72/25.4;           // mm → pt
+const B5_W = 182*MM;          // B5 가로 (이름 위치 비율 기준)
+function b64ToBytes(b64){ const s=atob(b64.replace(/\s/g,'')); const a=new Uint8Array(s.length); for(let i=0;i<s.length;i++) a[i]=s.charCodeAt(i); return a; }
+function bytesToB64(buf){ const a=new Uint8Array(buf); let s=''; for(let i=0;i<a.length;i+=0x8000) s+=String.fromCharCode.apply(null, a.subarray(i,i+0x8000)); return btoa(s); }
+// 이름을 그림(PNG)으로 만들어서 붙임 → 한글 글꼴 따로 필요 없음
+function nameToPng(name, sizePt){
+  const px = sizePt*4, c=document.createElement('canvas'), g=c.getContext('2d');
+  const font = `bold ${px}px 'Malgun Gothic','맑은 고딕','Noto Sans KR',sans-serif`;
+  g.font = font; const w = Math.ceil(g.measureText(name).width)+8;
+  c.width = w; c.height = Math.ceil(px*1.35);
+  g.font = font; g.fillStyle = '#000'; g.textBaseline = 'top'; g.fillText(name, 4, px*0.12);
+  return { data: c.toDataURL('image/png'), w: c.width, h: c.height };
 }
-async function loadAgent(){
-  const { data } = await sb.rpc('exam_agent_status');
-  const el = $('agent');
-  if(data && (Date.now() - new Date(data).getTime()) < 30000){ el.className='agent on'; el.textContent='🟢 인쇄 PC 연결됨'; }
-  else { el.className='agent off'; el.textContent='🔴 인쇄 PC 꺼짐 — 요청은 쌓였다가 켜지면 인쇄돼요'; }
+// sets: 부수만큼의 배열. 각 칸이 null이면 그냥, 이름이면 첫 장에 이름 찍음
+async function buildPdf(srcBytes, sets, pos){
+  const { PDFDocument } = PDFLib;
+  const src = await PDFDocument.load(srcBytes);
+  const out = await PDFDocument.create();
+  const n = src.getPageCount();
+  for(const name of sets){
+    const pages = await out.copyPages(src, src.getPageIndices());
+    for(let i=0;i<pages.length;i++){
+      const pg = out.addPage(pages[i]);
+      if(i===0 && name){
+        const { width, height } = pg.getSize(), scale = width / B5_W;
+        const img = nameToPng(name, pos.size), png = await out.embedPng(img.data);
+        const h = pos.size*1.35*scale, w = h * img.w / img.h;
+        pg.drawImage(png, { x: pos.x*MM*scale, y: height - pos.y*MM*scale - h, width: w, height: h });
+      }
+    }
+    // 양면이라 홀수 쪽이면 빈 면을 넣어서 다음 부가 새 종이에서 시작되게
+    if(n % 2 === 1){ const { width, height } = pages[n-1].getSize(); out.addPage([width, height]); }
+  }
+  return out.save();
 }
+// 브라우저 인쇄창 열기
+function printPdf(bytes){
+  const url = URL.createObjectURL(new Blob([bytes], {type:'application/pdf'}));
+  let f = $('printFrame'); if(f) f.remove();
+  f = document.createElement('iframe'); f.id = 'printFrame';
+  f.style.cssText = 'position:fixed;right:0;bottom:0;width:1px;height:1px;border:0;opacity:0';
+  f.onload = () => { setTimeout(()=>{ try{ f.contentWindow.focus(); f.contentWindow.print(); }catch(e){ window.open(url); } }, 300); };
+  f.src = url; document.body.appendChild(f);
+}
+function libPos(l){ return { x:Number(l.name_x), y:Number(l.name_y), size:Number(l.name_size) }; }
 
 // ---------- 시험지 보관함 ----------
 async function loadLibrary(){
   const { data, error } = await sb.from('exam_library').select('*').order('book').order('sort_order').order('id');
   if(error){ toast('보관함 불러오기 실패: '+errMsg(error), true); return; }
   library = data || [];
-  render(); renderJobs();
+  render();
 }
 function libById(id){ return id ? library.find(l=>l.id===id) : null; }
 function libBooks(cat){ return [...new Set(library.filter(l=>l.category===cat).map(l=>l.book))].sort((a,b)=>a.localeCompare(b,'ko',{numeric:true})); }
@@ -277,23 +305,6 @@ function render(){
       <td><span class="file ${lib&&lib.main_file?'has':''}">본</span><span class="file ${lib&&lib.retest_file?'has':''}">재</span></td>
       <td><div class="actions">${act}</div></td>
     </tr>`;
-  }).join('');
-}
-
-function renderJobs(){
-  if(!jobs.length){ $('jobs').innerHTML = '<div class="hint">아직 인쇄 작업이 없어요</div>'; return; }
-  const byId = Object.fromEntries(papers.map(p=>[p.id,p]));
-  $('jobs').innerHTML = jobs.map(j=>{
-    const p = byId[j.paper_id] || {};
-    const l = libById(j.library_id) || {};
-    const type = j.job_type==='main' ? `본시험지 ${j.copies}부` : j.job_type==='retest' ? `재시험지 ${j.names.length}명 (${esc(j.names.join(', '))})` : '이름 위치 테스트 1장';
-    const who = j.paper_id ? `${esc(p.exam_date||'')} ${esc(p.teacher||'')} ${esc(p.level||'')}` : '';
-    const cancel = (adminPw && j.status==='대기') ? `<button class="sm danger" onclick="cancelJob(${j.id})">취소</button>` : '';
-    return `<div class="job">
-      <span class="t">${fmtTime(j.created_at)}</span>
-      <span class="what">[${CAT_LABEL[l.category]||''}] ${who} ${esc(l.book||'')} ${esc(l.lesson||'')} — ${type}${j.error?` <span style="color:var(--red)">· ${esc(j.error)}</span>`:''}</span>
-      <span class="badge j-${j.status}">${j.status}</span>${cancel}
-    </div>`;
   }).join('');
 }
 
@@ -428,7 +439,7 @@ function openRetest(id){
     <h2>재시험지 인쇄</h2>
     <div class="desc">${esc(p.exam_date)} · ${esc(p.teacher)} · ${esc(p.level)} · ${esc(p.book)}</div>
     <textarea id="r_names" rows="8" placeholder="재시 대상자 이름을 한 줄에 한 명씩 (또는 쉼표로 구분)"></textarea>
-    <div class="hint">이름이 시험지에 찍혀서 한 명당 한 부씩 인쇄돼요. <span id="r_count"></span></div>
+    <div class="hint">이름이 시험지에 찍혀서 한 명당 한 부씩 인쇄창이 열려요. 인쇄창에서 용지 B5 · 양면을 확인하세요. <span id="r_count"></span></div>
     <div class="btns"><button onclick="closeModal()">취소</button><button class="primary" onclick="sendRetest(${id})">🖨 인쇄</button></div>`);
   const ta=$('r_names'); ta.oninput=()=>{ $('r_count').textContent = splitNames(ta.value).length ? `(${splitNames(ta.value).length}명)` : ''; };
 }
@@ -436,14 +447,20 @@ function splitNames(t){ return t.split(/[\n,，]+/).map(s=>s.trim()).filter(Bool
 async function sendRetest(id){
   const names = splitNames($('r_names').value);
   if(!names.length) return toast('이름을 입력해 주세요', true);
-  const { error } = await sb.rpc('exam_request_retest', {p_paper:id, p_names:names});
-  if(error) return toast('요청 실패: '+errMsg(error), true);
-  closeModal(); toast(`재시험지 ${names.length}명 인쇄 요청했어요`); loadJobs();
+  const lib = libById(papers.find(x=>x.id===id).library_id);
+  if(!lib || !lib.retest_file) return toast('보관함에 재시험지가 없어요', true);
+  toast('재시험지 준비 중…');
+  const { data, error } = await sb.rpc('exam_get_retest', {p_lib:lib.id});
+  if(error) return toast('불러오기 실패: '+errMsg(error), true);
+  try{
+    const pdf = await buildPdf(b64ToBytes(data), names, libPos(lib));
+    closeModal(); printPdf(pdf);
+  }catch(e){ toast('PDF 만들기 실패: '+errMsg(e), true); }
 }
 
 // ---------- 관리자 ----------
 function toggleAdmin(){
-  if(adminPw){ adminPw=null; updateAdminUI(); render(); renderJobs(); toast('관리자 모드 해제'); return; }
+  if(adminPw){ adminPw=null; updateAdminUI(); render(); toast('관리자 모드 해제'); return; }
   showModal(`
     <h2>관리자 로그인</h2>
     <div class="desc">본시험지 등록·인쇄는 관리자만 할 수 있어요</div>
@@ -455,7 +472,7 @@ async function adminLogin(){
   const { data, error } = await sb.rpc('exam_check_admin', {p_pw:pw});
   if(error) return toast('서버 오류: '+errMsg(error)+' (SQL 설치를 확인하세요)', true);
   if(!data) return toast('비밀번호가 틀렸어요', true);
-  adminPw = pw; closeModal(); updateAdminUI(); render(); renderJobs(); toast('관리자 모드');
+  adminPw = pw; closeModal(); updateAdminUI(); render(); toast('관리자 모드');
 }
 function updateAdminUI(){
   $('adminBtn').textContent = adminPw ? '🔓 관리자 (나가기)' : '🔒 관리자';
@@ -524,8 +541,11 @@ function renderSemModal(){
       </table>
       <div style="display:flex;gap:6px;margin-top:6px">
         <button class="sm" onclick="draft.classes.push({teacher:'',level:'',timeslot:''});renderSemModal()">＋ 반 추가</button>
+        <button class="sm primary" onclick="$('sem_xl_file').click()">📄 반현황 엑셀로 불러오기</button>
+        <input type="file" id="sem_xl_file" accept=".xlsx,.xls,.csv" style="display:none" onchange="readClassExcel(this.files[0]);this.value=''">
         <button class="sm" onclick="toggleSemPaste()">시트에서 붙여넣기</button>
       </div>
+      <div id="sem_excel"></div>
       <div id="sem_paste" style="display:none;margin-top:6px">
         <textarea id="sem_paste_text" rows="5" placeholder="담임	레벨	시간대	문법교재  (탭으로 구분, 구글 시트에서 복사)"></textarea>
         <button class="sm" onclick="applySemPaste()">추가</button>
@@ -552,6 +572,86 @@ function renderSemBooks(){
       <td><input value="${esc(draft.books[l]||'')}" oninput="draft.books[semLevels[${i}]]=this.value" placeholder="문법교재"></td>
     </tr>`).join('')}</table>` : '<div class="hint">반을 먼저 추가하면 레벨이 여기에 나와요</div>';
 }
+// --- 반현황 엑셀 불러오기 ---
+let xl = null;   // {wb, sheet, rows, hdr, map:{teacher,level,slot,slot2,book}, strip}
+const XL_GUESS = {
+  teacher: /담임|선생|강사|teacher/i,
+  level:   /레벨|level|반명|^반$|클래스|class/i,
+  slot:    /시간대|요일|time|시간/i,
+  slot2:   /교시|타임|period/i,
+  book:    /문법|교재|book/i
+};
+async function readClassExcel(file){
+  if(!file) return;
+  try{
+    const wb = XLSX.read(await file.arrayBuffer(), {type:'array'});
+    xl = { wb, sheet: wb.SheetNames[0], strip:false };
+    loadXlSheet();
+  }catch(e){ toast('엑셀 읽기 실패: '+errMsg(e), true); }
+}
+function loadXlSheet(){
+  const rows = XLSX.utils.sheet_to_json(xl.wb.Sheets[xl.sheet], {header:1, defval:'', raw:false})
+    .map(r=>r.map(c=>String(c??'').replace(/​/g,'').trim()));
+  // 머리글 줄 찾기: 위쪽 15줄 중 '담임' 같은 글자가 있는 줄
+  let hdr = rows.slice(0,15).findIndex(r=>r.some(c=>XL_GUESS.teacher.test(c)));
+  if(hdr < 0) hdr = 0;
+  const head = rows[hdr] || [];
+  const guess = k => { const i = head.findIndex((c,j)=>XL_GUESS[k].test(c) && !(k!=='teacher' && XL_GUESS.teacher.test(c))); return i; };
+  const map = { teacher:guess('teacher'), level:guess('level'), slot:guess('slot'), slot2:-1, book:guess('book') };
+  const s2 = head.findIndex((c,j)=>XL_GUESS.slot2.test(c) && j!==map.slot); if(s2>=0) map.slot2 = s2;
+  Object.assign(xl, { rows, hdr, map });
+  renderXl();
+}
+function xlClasses(){
+  const { rows, hdr, map, strip } = xl, out = [], seen = new Set(), books = {};
+  let lastT = '', lastL = '';
+  for(const r of rows.slice(hdr+1)){
+    // 병합된 칸(위 줄과 같은 담임·레벨)은 비어 있어서 위 값을 이어받음
+    let t = map.teacher>=0 ? r[map.teacher] : ''; if(!t) t = lastT; else lastT = t;
+    let l = map.level>=0 ? r[map.level] : '';     if(!l && r.some(Boolean)) l = lastL; else if(l) lastL = l;
+    if(strip) l = l.replace(/\s*[\(\[（].*?[\)\]）]\s*/g,'').trim();
+    let s = map.slot>=0 ? r[map.slot] : '';
+    if(map.slot2>=0 && r[map.slot2]) s = (s + r[map.slot2]).replace(/\s+/g,'');
+    if(!t || !l || XL_GUESS.teacher.test(t)) continue;
+    const key = t+'|'+l+'|'+s;
+    if(!seen.has(key)){ seen.add(key); out.push({teacher:t, level:l, timeslot:s}); }
+    if(map.book>=0 && r[map.book] && !books[l]) books[l] = r[map.book];
+  }
+  return { list: out, books };
+}
+function renderXl(){
+  const head = xl.rows[xl.hdr] || [];
+  const colOpts = sel => `<option value="-1">(없음)</option>` + head.map((c,i)=>`<option value="${i}" ${i===sel?'selected':''}>${esc(c||('열 '+(i+1)))}</option>`).join('');
+  const { list } = xlClasses();
+  $('sem_excel').innerHTML = `<div class="upload-box" style="margin-top:8px">
+    <b>엑셀에서 어느 칸이 무엇인지 확인해 주세요</b>
+    <div class="form" style="grid-template-columns:80px 1fr 80px 1fr;margin-top:6px">
+      ${xl.wb.SheetNames.length>1?`<label>시트</label><select onchange="xl.sheet=this.value;loadXlSheet()" style="grid-column:span 3">${xl.wb.SheetNames.map(n=>`<option ${n===xl.sheet?'selected':''}>${esc(n)}</option>`).join('')}</select>`:''}
+      <label>담임</label><select onchange="xl.map.teacher=+this.value;renderXl()">${colOpts(xl.map.teacher)}</select>
+      <label>레벨</label><select onchange="xl.map.level=+this.value;renderXl()">${colOpts(xl.map.level)}</select>
+      <label>시간대</label><select onchange="xl.map.slot=+this.value;renderXl()">${colOpts(xl.map.slot)}</select>
+      <label>교시<br><span class="hint">(시간대 뒤에 붙임)</span></label><select onchange="xl.map.slot2=+this.value;renderXl()">${colOpts(xl.map.slot2)}</select>
+      <label>문법교재</label><select onchange="xl.map.book=+this.value;renderXl()">${colOpts(xl.map.book)}</select>
+      <label></label><label style="display:flex;gap:4px;align-items:center"><input type="checkbox" ${xl.strip?'checked':''} onchange="xl.strip=this.checked;renderXl()" style="width:auto"> 레벨에서 괄호 빼기 <span class="hint" style="margin:0">MA1(1-3개월)→MA1</span></label>
+    </div>
+    <div class="hint">반 ${list.length}개 인식 · 미리보기: ${list.slice(0,6).map(c=>`${esc(c.teacher)} · ${esc(c.level)} · ${esc(c.timeslot||'-')}`).join(' / ')}${list.length>6?' …':''}</div>
+    <div style="display:flex;gap:6px;margin-top:8px">
+      <button class="sm primary" ${list.length?'':'disabled'} onclick="applyXl(true)">반 목록 바꾸기</button>
+      <button class="sm" ${list.length?'':'disabled'} onclick="applyXl(false)">기존 목록에 더하기</button>
+      <button class="sm" onclick="xl=null;$('sem_excel').innerHTML=''">취소</button>
+    </div>
+  </div>`;
+}
+function applyXl(replace){
+  const { list, books } = xlClasses();
+  const base = replace ? [] : draft.classes.filter(c=>c.teacher.trim()||c.level.trim());
+  const seen = new Set(base.map(c=>c.teacher+'|'+c.level+'|'+c.timeslot));
+  for(const c of list){ const k=c.teacher+'|'+c.level+'|'+c.timeslot; if(!seen.has(k)){ seen.add(k); base.push(c); } }
+  draft.classes = base.sort((a,b)=>a.teacher.localeCompare(b.teacher)||a.level.localeCompare(b.level)||a.timeslot.localeCompare(b.timeslot));
+  for(const [l,b] of Object.entries(books)) if(!draft.books[l]) draft.books[l]=b;
+  xl = null; renderSemModal(); toast(`반 ${list.length}개 불러왔어요. 확인 후 저장을 눌러주세요`);
+}
+
 function toggleSemPaste(){ const b=$('sem_paste'); b.style.display = b.style.display==='none' ? 'block' : 'none'; }
 function applySemPaste(){
   let n=0;
@@ -668,12 +768,13 @@ function openLibItem(id){
       <b>본시험지 ${l.main_file?'✅ 등록됨':'— 없음'}</b>
       <input type="file" accept="application/pdf" id="u_main">
       <button class="sm" onclick="uploadLibFile(${id},'main')">${l.main_file?'교체':'등록'}</button>
+      ${l.main_file?`<button class="sm danger" onclick="unlinkLibFile(${id},'main')">파일 삭제</button>`:''}
     </div>
     <div class="upload-box">
       <b>재시험지 ${l.retest_file?'✅ 등록됨':'— 없음'}</b>
       <input type="file" accept="application/pdf" id="u_retest">
       <button class="sm" onclick="uploadLibFile(${id},'retest')">${l.retest_file?'교체':'등록'}</button>
-      ${l.retest_file?`<button class="sm danger" onclick="unlinkLibFile(${id},'retest')">연결 해제</button>`:''}
+      ${l.retest_file?`<button class="sm danger" onclick="unlinkLibFile(${id},'retest')">파일 삭제</button>`:''}
       <div style="margin-top:10px"><b style="display:inline">이름 찍는 위치</b> <span class="hint">(첫 장, 종이 왼쪽 위 모서리 기준 mm)</span></div>
       <div class="form" style="grid-template-columns:auto 70px auto 70px auto 60px;margin-top:6px">
         <label>가로</label><input type="number" id="n_x" value="${l.name_x}">
@@ -682,11 +783,11 @@ function openLibItem(id){
       </div>
       <div style="margin-top:8px;display:flex;gap:6px">
         <button class="sm" onclick="saveNamePos(${id})">위치 저장</button>
-        <button class="sm" ${l.retest_file?'':'disabled'} onclick="testPrint(${id})">'홍길동'으로 1장 테스트 인쇄</button>
+        <button class="sm" ${l.retest_file?'':'disabled'} onclick="testPrint(${id})">'홍길동'으로 테스트 인쇄</button>
       </div>
       <div class="hint">B5 용지는 가로 182mm × 세로 257mm예요. 테스트 인쇄로 위치를 확인한 뒤 숫자를 조금씩 조정하세요.</div>
     </div>
-    <div class="hint">🔒 등록된 파일은 이 사이트에서 아무도 열어볼 수 없고, 인쇄 PC 프로그램만 내려받아 인쇄해요.</div>
+    <div class="hint">🔒 본시험지는 관리자 비번이 있어야만 열려요. 재시험지는 조교샘이 인쇄할 때 인쇄 미리보기로 보여요.</div>
     <div class="btns">
       <button class="danger" onclick="deleteLib(${id})" style="margin-right:auto">레슨 삭제</button>
       <button onclick="openLibrary(${JSON.stringify(l.book).replace(/"/g,'&quot;')})">보관함</button>
@@ -698,19 +799,17 @@ async function uploadLibFile(id, kind){
   const f = $(kind==='main'?'u_main':'u_retest').files[0];
   if(!f) return toast('PDF 파일을 선택해 주세요', true);
   if(f.type!=='application/pdf' && !/\.pdf$/i.test(f.name)) return toast('PDF만 등록할 수 있어요', true);
-  const l = libById(id);
-  const path = `${l.category}/lib${id}/${kind}_${Date.now()}.pdf`;
+  if(f.size > 8*1024*1024) return toast('8MB 이하 PDF만 올릴 수 있어요', true);
   toast('올리는 중…');
-  const up = await sb.storage.from('exam-papers').upload(path, f, {contentType:'application/pdf', upsert:false});
-  if(up.error) return toast('업로드 실패: '+errMsg(up.error), true);
-  const { error } = await sb.rpc('exam_lib_set_file', {p_pw:adminPw, p_lib:id, p_kind:kind, p_path:path});
-  if(error) return toast('등록 실패: '+errMsg(error), true);
+  const b64 = bytesToB64(await f.arrayBuffer());
+  const { error } = await sb.rpc('exam_lib_upload', {p_pw:adminPw, p_lib:id, p_kind:kind, p_name:f.name, p_b64:b64});
+  if(error) return toast('업로드 실패: '+errMsg(error), true);
   toast(kind==='main'?'본시험지 등록 완료':'재시험지 등록 완료');
   await loadLibrary(); openLibItem(id);
 }
 async function unlinkLibFile(id, kind){
-  if(!confirm('재시험지 연결을 해제할까요?')) return;
-  const { error } = await sb.rpc('exam_lib_set_file', {p_pw:adminPw, p_lib:id, p_kind:kind, p_path:null});
+  if(!confirm(`${kind==='main'?'본':'재'}시험지 파일을 지울까요?`)) return;
+  const { error } = await sb.rpc('exam_lib_remove_file', {p_pw:adminPw, p_lib:id, p_kind:kind});
   if(error) return toast('실패: '+errMsg(error), true);
   await loadLibrary(); openLibItem(id);
 }
@@ -731,17 +830,19 @@ async function deleteLib(id){
 }
 async function saveNamePos(id){
   const { error } = await sb.rpc('exam_lib_set_name_pos', {p_pw:adminPw, p_lib:id, p_x:Number($('n_x').value), p_y:Number($('n_y').value), p_size:Number($('n_s').value)});
-  if(error) return toast('저장 실패: '+errMsg(error), true);
-  toast('위치 저장'); loadLibrary();
+  if(error){ toast('저장 실패: '+errMsg(error), true); return false; }
+  toast('위치 저장'); await loadLibrary(); return true;
 }
+// 이름 위치 확인: '홍길동' 찍힌 재시험지 1부를 인쇄창으로
 async function testPrint(id){
-  await saveNamePos(id);
-  const { error } = await sb.rpc('exam_request_test', {p_pw:adminPw, p_lib:id});
-  if(error) return toast('요청 실패: '+errMsg(error), true);
-  toast('테스트 1장 인쇄 요청'); loadJobs();
+  if(!(await saveNamePos(id))) return;
+  const { data, error } = await sb.rpc('exam_get_retest', {p_lib:id});
+  if(error) return toast('불러오기 실패: '+errMsg(error), true);
+  try{ printPdf(await buildPdf(b64ToBytes(data), ['홍길동'], libPos(libById(id)))); }
+  catch(e){ toast('PDF 만들기 실패: '+errMsg(e), true); }
 }
 
-// 본시험지 인쇄
+// 본시험지 인쇄 (관리자)
 function openPrint(id){
   const p = papers.find(x=>x.id===id);
   const c = parseCopies(p.headcount) || '';
@@ -749,20 +850,31 @@ function openPrint(id){
     <h2>본시험지 인쇄</h2>
     <div class="desc">${esc(p.exam_date)} · ${esc(p.teacher)} · ${esc(p.level)} · ${esc(p.book)} ${esc(p.lesson)}</div>
     <div class="form"><label>부수</label><input type="number" id="p_copies" min="1" max="200" value="${c}"></div>
-    <div class="hint">신청 인원 ${esc(p.headcount||'-')} 기준이에요. B5 · 양면으로 인쇄되고, 끝나면 '준비완료'로 바뀌어요.</div>
-    <div class="btns"><button onclick="closeModal()">취소</button><button class="primary" onclick="sendPrint(${id})">🖨 인쇄</button></div>`);
+    <div class="hint">신청 인원 ${esc(p.headcount||'-')} 기준이에요. 부수만큼 합쳐서 인쇄창이 열리니, 인쇄창에서는 <b>매수 1</b> 그대로 두고 <b>용지 B5 · 양면</b>만 확인하세요.</div>
+    <div class="btns"><button onclick="closeModal()">취소</button><button class="primary" id="p_go" onclick="sendPrint(${id})">🖨 인쇄창 열기</button></div>`);
 }
 async function sendPrint(id){
   const n = parseInt($('p_copies').value,10);
   if(!(n>=1 && n<=200)) return toast('부수를 확인해 주세요', true);
-  const { error } = await sb.rpc('exam_request_print', {p_pw:adminPw, p_paper:id, p_copies:n});
-  if(error) return toast('요청 실패: '+errMsg(error), true);
-  closeModal(); toast(`${n}부 인쇄 요청했어요`); loadPapers(); loadJobs();
+  const p = papers.find(x=>x.id===id), lib = libById(p.library_id);
+  if(!lib || !lib.main_file) return toast('보관함에 본시험지가 없어요', true);
+  $('p_go').disabled = true; toast('시험지 준비 중…');
+  const { data, error } = await sb.rpc('exam_get_main', {p_pw:adminPw, p_lib:lib.id});
+  if(error){ $('p_go').disabled=false; return toast('불러오기 실패: '+errMsg(error), true); }
+  try{
+    printPdf(await buildPdf(b64ToBytes(data), Array(n).fill(null), libPos(lib)));
+  }catch(e){ $('p_go').disabled=false; return toast('PDF 만들기 실패: '+errMsg(e), true); }
+  // 인쇄창은 끝났는지 알 수 없어서, 인쇄 후 직접 '준비완료' 누르기
+  showModal(`
+    <h2>인쇄창이 열렸어요</h2>
+    <div class="desc">${esc(p.teacher)} · ${esc(p.level)} · ${esc(p.book)} ${esc(p.lesson)} — ${n}부</div>
+    <div class="hint">인쇄를 마쳤으면 '준비완료로 표시'를 눌러주세요.</div>
+    <div class="btns"><button onclick="closeModal()">나중에</button><button class="primary" onclick="markReady(${id})">✅ 준비완료로 표시</button></div>`);
 }
-async function cancelJob(jid){
-  const { error } = await sb.rpc('exam_cancel_job', {p_pw:adminPw, p_job:jid});
-  if(error) return toast('취소 실패: '+errMsg(error), true);
-  toast('취소했어요'); loadJobs(); loadPapers();
+async function markReady(id){
+  const { error } = await sb.from('exam_papers').update({status:'준비완료', updated_at:new Date().toISOString()}).eq('id',id);
+  if(error) return toast('변경 실패: '+errMsg(error), true);
+  closeModal(); toast('준비완료'); loadPapers();
 }
 
 // 구글 시트에서 복사-붙여넣기로 기존 기록 옮기기
@@ -799,8 +911,7 @@ async function doImport(){
 
 // ---------- 시작 ----------
 setTab('munin');
-loadSettings(); loadLibrary(); loadPapers(); loadJobs(); loadAgent();
-setInterval(()=>{ loadJobs(); loadAgent(); }, 5000);
+loadSettings(); loadLibrary(); loadPapers();
 setInterval(()=>{ if(!$('modalBg').classList.contains('show')) loadPapers(); }, 20000);
 </script>
 </body>
