@@ -243,6 +243,10 @@ function libLessons(cat, book){
     .sort((a,b)=>a.lesson.localeCompare(b.lesson, 'ko', {numeric:true, sensitivity:'base'}));
 }
 function libFind(cat, book, lesson){ return lesson ? (library.find(l=>l.category===cat && l.book===book && l.lesson===lesson) || null) : null; }
+// CHAT은 레슨 없이 교재(시험) 하나 = 시험지 하나. 문인시는 교재+챕터
+const BOOK_ONLY = cat => cat === 'chat';
+function bookRow(cat, book){ return book ? (library.find(l=>l.category===cat && l.book===book && l.lesson==='') || null) : null; }
+function libFor(cat, book, lesson){ return BOOK_ONLY(cat) ? bookRow(cat, book) : libFind(cat, book, lesson); }
 
 // ---------- 학기 ----------
 async function loadSettings(){
@@ -374,6 +378,13 @@ function buildBook(value){
 // Chapter/Lesson: 보관함에 등록된 레슨만 드롭다운 (철자가 항상 같아서 시험지와 정확히 연결됨)
 function buildLesson(value){
   const book = fval('f_book');
+  if(BOOK_ONLY(editCat)){
+    // CHAT: 레슨은 메모용 자유 입력. 시험지는 교재로 연결
+    const ok = bookRow(editCat, book);
+    $('w_lesson').innerHTML = `<input id="f_lesson" value="${esc(value)}" placeholder="예: 13-14 (메모)">`
+      + (book && !ok ? `<div class="hint" style="margin-top:3px">이 교재는 보관함에 없어서 시험지가 연결되지 않아요.</div>` : '');
+    return;
+  }
   const list = libLessons(editCat, book).map(l=>l.lesson);
   if(!book && !value){ $('w_lesson').innerHTML = waitHTML('f_lesson', '교재 먼저 선택'); return; }
   if(!list.length){
@@ -421,7 +432,7 @@ async function savePaper(id){
     book: $('f_book').value.trim(), lesson: $('f_lesson').value.trim(), timeslot: $('f_slot').value.trim(),
     headcount: $('f_head').value.trim(), status: $('f_status').value, note: $('f_note').value.trim()
   };
-  const lib = libFind(editCat, row.book, row.lesson);
+  const lib = libFor(editCat, row.book, row.lesson);
   row.library_id = lib ? lib.id : null;
   let error;
   if(id) ({error} = await sb.from('exam_papers').update({...row, updated_at:new Date().toISOString()}).eq('id',id));
@@ -711,7 +722,16 @@ function openLibrary(book){
   if(book !== undefined) libFilter = book;
   const cat = tab;
   const books = allBooks(cat).filter(b=>!libFilter || b===libFilter);
-  const body = books.length ? books.map(b=>{
+  const body = !books.length ? `<div class="hint">${libFilter?'해당 교재가 없어요':'아직 교재가 없어요. 📋 교재 여러 개 붙여넣기로 시작하세요.'}</div>`
+  : BOOK_ONLY(cat) ? `<div class="upload-box"><table class="sem-table">${books.map(b=>{
+      const r = bookRow(cat, b);
+      return `<tr>
+        <td>${esc(b)}</td>
+        <td style="width:70px"><span class="file ${r&&r.main_file?'has':''}">본</span><span class="file ${r&&r.retest_file?'has':''}">재</span></td>
+        <td style="text-align:right;width:60px"><button class="sm" onclick="openBookItem(${jsq(b)})">열기</button></td>
+      </tr>`; }).join('')}</table>
+      <div class="hint">${books.filter(b=>{const r=bookRow(cat,b);return r&&r.main_file;}).length}/${books.length}개 교재에 본시험지 있음</div></div>`
+  : books.map(b=>{
     const ls = libLessons(cat, b);
     const done = ls.filter(l=>l.main_file).length, doneR = ls.filter(l=>l.retest_file).length;
     return `<div class="upload-box">
@@ -727,19 +747,29 @@ function openLibrary(book){
         <td style="text-align:right"><button class="sm" onclick="openLibItem(${l.id})">열기</button></td>
       </tr>`).join('')}</table>` : ''}
     </div>`;
-  }).join('') : `<div class="hint">${libFilter?'해당 교재가 없어요':'아직 교재가 없어요. 학기 설정에서 반현황을 넣거나 ＋ 교재 추가로 시작하세요.'}</div>`;
+  }).join('');
   showModal(`
     <h2>📚 ${CAT_LABEL[cat]} 시험지 보관함</h2>
-    <div class="desc">한 번 올려두면 학기와 상관없이 계속 써요. ${cat==='munin'?'학기 설정(반현황)에 넣은 문법교재는 여기 자동으로 나와요.':''}</div>
+    <div class="desc">한 번 올려두면 학기와 상관없이 계속 써요. ${cat==='munin'?'학기 설정(반현황)에 넣은 문법교재는 여기 자동으로 나와요.':'CHAT은 교재(시험) 하나에 시험지 하나예요. DSC1·DSC2 묶음 시험은 <b>Book A + Book B</b>처럼 한 줄로 교재 추가하세요.'}</div>
     <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
       <select onchange="openLibrary(this.value)"><option value="">전체 교재</option>${allBooks(cat).map(b=>`<option ${b===libFilter?'selected':''}>${esc(b)}</option>`).join('')}</select>
       <span class="spacer"></span>
       <button class="sm" onclick="openAddBooks()">📋 교재 여러 개 붙여넣기</button>
-      <button class="sm" onclick="openAddLessons('')">＋ 교재 추가</button>
+      ${BOOK_ONLY(cat)?'':`<button class="sm" onclick="openAddLessons('')">＋ 교재 추가</button>`}
       <button class="primary sm" onclick="openBulk()">📤 여러 파일 한 번에 올리기</button>
     </div>
     ${body}
     <div class="btns"><button onclick="closeModal()">닫기</button></div>`, true);
+}
+// CHAT 교재 열기 (자리표시 줄이 없던 교재면 만들고 열기)
+async function openBookItem(book){
+  let r = bookRow(tab, book);
+  if(!r){
+    const { error } = await sb.rpc('exam_lib_add_books', {p_pw:adminPw, p_category:tab, p_books:[book]});
+    if(error) return toast('실패: '+errMsg(error), true);
+    await loadLibrary(); r = bookRow(tab, book);
+  }
+  if(r) openLibItem(r.id);
 }
 function openAddLessons(book){
   showModal(`
@@ -827,6 +857,7 @@ function guessBook(name){
   return hit[0] || libFilter || '';
 }
 function guessLesson(name, book){
+  if(BOOK_ONLY(tab)) return { key:'book', newName:'' };
   const f = nums(name, true);
   const l = libLessons(tab, book).find(x=>sameNums(f, nums(x.lesson)));
   if(l) return { key:String(l.id), newName:'' };
@@ -844,7 +875,7 @@ function openBulk(){
   bulk = [];
   showModal(`
     <h2>📤 ${CAT_LABEL[tab]} 시험지 여러 개 올리기</h2>
-    <div class="desc">PDF를 한꺼번에 고르면 파일 이름을 보고 교재·챕터·본/재를 자동으로 짝지어요. 틀린 칸만 고치고 '모두 올리기'를 누르세요.<br>
+    <div class="desc">PDF를 한꺼번에 고르면 파일 이름을 보고 교재${BOOK_ONLY(tab)?'':'·챕터'}·본/재를 자동으로 짝지어요. 틀린 칸만 고치고 '모두 올리기'를 누르세요.<br>
       파일 이름에 <b>재시·2차</b>가 있으면 재시험지, 없으면 본시험지로 봐요.</div>
     <div class="form" style="grid-template-columns:110px 1fr">
       <label>PDF 파일</label><input type="file" accept="application/pdf" multiple onchange="addBulkFiles(this.files);this.value=''">
@@ -856,18 +887,27 @@ function openBulk(){
 function addBulkFiles(files){
   for(const f of files){
     if(!/\.pdf$/i.test(f.name) && f.type!=='application/pdf') continue;
-    const book = guessBook(f.name), g = guessLesson(f.name, book);
-    bulk.push({ file:f, book, key:g.key, newName:g.newName, kind:guessKind(f.name), msg:'' });
+    let book = guessBook(f.name); const g = guessLesson(f.name, book);
+    const r = { file:f, book, key:g.key, newName:g.newName, kind:guessKind(f.name), msg:'', newBook:'' };
+    if(BOOK_ONLY(tab) && !book){ r.book='__new'; r.newBook=titleFromFile(f.name); }
+    bulk.push(r);
   }
   renderBulk();
 }
-function bulkSetBook(i, v){ const r=bulk[i]; r.book=v; Object.assign(r, guessLesson(r.file.name, v)); renderBulk(); }
+// 파일 이름 → 교재 이름 후보 (CHAT 새 교재용)
+function titleFromFile(n){
+  return cleanBookTitle(String(n).replace(/\.pdf$/i,'').replace(/[_]+/g,' ')
+    .replace(/\b(chat|test|본시험지?|재시험지?|재시|[12]차)\b/gi,'').replace(/\s+/g,' '));
+}
+function bulkSetBook(i, v){ const r=bulk[i]; r.book=v; if(v==='__new' && !r.newBook) r.newBook=titleFromFile(r.file.name); Object.assign(r, guessLesson(r.file.name, v)); renderBulk(); }
 function bulkSetAllBooks(v){ if(!v) return; bulk.forEach((r,i)=>{ r.book=v; Object.assign(r, guessLesson(r.file.name, v)); }); renderBulk(); }
 function renderBulk(){
   const books = allBooks(tab);
-  const target = r => r.key==='new' ? r.book+'|'+r.newName.trim()+'|'+r.kind : r.key+'|'+r.kind;
+  const chat = BOOK_ONLY(tab);
+  const bookName = r => r.book==='__new' ? r.newBook.trim() : r.book;
+  const target = r => chat ? bookName(r)+'|'+r.kind : r.key==='new' ? r.book+'|'+r.newName.trim()+'|'+r.kind : r.key+'|'+r.kind;
   const count = {}; bulk.forEach(r=>{ if(r.kind!=='skip') count[target(r)]=(count[target(r)]||0)+1; });
-  const ready = bulk.filter(r=>r.kind!=='skip' && r.book && (r.key && r.key!=='new' || (r.key==='new' && r.newName.trim()))).length;
+  const ready = bulk.filter(r=>bulkReady(r)).length;
   $('bulk_area').innerHTML = bulk.length ? `
     <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
       <span class="hint" style="margin:0">교재 한 번에 바꾸기:</span>
@@ -875,17 +915,18 @@ function renderBulk(){
       <span class="spacer"></span><span class="hint" style="margin:0">${bulk.length}개 중 ${ready}개 준비됨</span>
     </div>
     <table class="sem-table bulk-table">
-      <tr><th>파일</th><th style="width:26%">교재</th><th style="width:26%">Chapter/Lesson</th><th style="width:13%">종류</th><th style="width:12%"></th></tr>
+      <tr><th>파일</th><th style="width:${chat?40:26}%">교재</th>${chat?'':'<th style="width:26%">Chapter/Lesson</th>'}<th style="width:13%">종류</th><th style="width:12%"></th></tr>
       ${bulk.map((r,i)=>{
         const ls = libLessons(tab, r.book);
         const dup = r.kind!=='skip' && count[target(r)]>1;
         return `<tr>
           <td title="${esc(r.file.name)}" style="word-break:break-all">${esc(r.file.name)}</td>
-          <td><select onchange="bulkSetBook(${i},this.value)"><option value="">교재 선택</option>${[...new Set([r.book,...books])].filter(Boolean).map(b=>`<option ${b===r.book?'selected':''}>${esc(b)}</option>`).join('')}</select></td>
-          <td><select onchange="bulk[${i}].key=this.value;renderBulk()" ${r.book?'':'disabled'}>
+          <td><select onchange="bulkSetBook(${i},this.value)"><option value="">교재 선택</option>${[...new Set([r.book,...books])].filter(Boolean).map(b=>`<option ${b===r.book?'selected':''}>${esc(b)}</option>`).join('')}${chat?`<option value="__new" ${r.book==='__new'?'selected':''}>＋ 새 교재</option>`:''}</select>
+              ${chat && r.book==='__new'?`<input value="${esc(r.newBook)}" oninput="bulk[${i}].newBook=this.value" onchange="renderBulk()" placeholder="새 교재(시험) 이름" style="margin-top:3px">`:''}</td>
+          ${chat?'':`<td><select onchange="bulk[${i}].key=this.value;renderBulk()" ${r.book?'':'disabled'}>
                 <option value="">선택</option>${ls.map(l=>`<option value="${l.id}" ${String(l.id)===r.key?'selected':''}>${esc(l.lesson)}${(r.kind==='main'?l.main_file:l.retest_file)?' (교체)':''}</option>`).join('')}
                 <option value="new" ${r.key==='new'?'selected':''}>＋ 새 레슨</option></select>
-              ${r.key==='new'?`<input value="${esc(r.newName)}" oninput="bulk[${i}].newName=this.value" onchange="renderBulk()" placeholder="새 레슨 이름" style="margin-top:3px">`:''}</td>
+              ${r.key==='new'?`<input value="${esc(r.newName)}" oninput="bulk[${i}].newName=this.value" onchange="renderBulk()" placeholder="새 레슨 이름" style="margin-top:3px">`:''}</td>`}
           <td><select onchange="bulk[${i}].kind=this.value;renderBulk()">
                 <option value="main" ${r.kind==='main'?'selected':''}>본시험지</option>
                 <option value="retest" ${r.kind==='retest'?'selected':''}>재시험지</option>
@@ -896,9 +937,21 @@ function renderBulk(){
     </table>` : '';
   $('bulk_go').disabled = !ready;
 }
+function bulkReady(r){
+  if(r.kind==='skip' || !r.book) return false;
+  if(BOOK_ONLY(tab)) return r.book!=='__new' || !!r.newBook.trim();
+  return !!r.key && (r.key!=='new' || !!r.newName.trim());
+}
 async function runBulk(){
   const go = $('bulk_go'); go.disabled = true;
-  const rows = bulk.filter(r=>r.kind!=='skip' && r.book && r.key && (r.key!=='new' || r.newName.trim()));
+  const rows = bulk.filter(bulkReady);
+  if(BOOK_ONLY(tab)){
+    // CHAT: 교재(시험) 자리 먼저 만들기 (이미 있으면 건너뜀)
+    const names = [...new Set(rows.map(r=>r.book==='__new' ? r.newBook.trim() : r.book))];
+    const { error } = await sb.rpc('exam_lib_add_books', {p_pw:adminPw, p_category:tab, p_books:names});
+    if(error){ go.disabled=false; return toast('교재 만들기 실패: '+errMsg(error), true); }
+    rows.forEach(r=>{ if(r.book==='__new'){ r.book = r.newBook.trim(); } });
+  }
   // 1) 새 레슨 먼저 만들기 (교재별로)
   const add = {};
   rows.filter(r=>r.key==='new').forEach(r=>{ (add[r.book] = add[r.book] || []).push(r.newName.trim()); });
@@ -910,7 +963,7 @@ async function runBulk(){
   // 2) 파일 하나씩 올리기
   let ok = 0;
   for(const r of rows){
-    const lib = r.key==='new' ? libFind(tab, r.book, r.newName.trim()) : libById(Number(r.key));
+    const lib = BOOK_ONLY(tab) ? bookRow(tab, r.book) : r.key==='new' ? libFind(tab, r.book, r.newName.trim()) : libById(Number(r.key));
     if(!lib){ r.msg = '<span style="color:var(--red)">레슨 없음</span>'; continue; }
     r.msg = '올리는 중…'; renderBulk(); $('bulk_go').disabled = true;
     try{
@@ -933,7 +986,7 @@ function openLibItem(id){
     <h2>시험지 등록</h2>
     <div class="form" style="margin-bottom:12px">
       <label>교재</label><input id="li_book" value="${esc(l.book)}">
-      <label>Chapter/Lesson</label><input id="li_lesson" value="${esc(l.lesson)}">
+      ${l.lesson===''?`<input type="hidden" id="li_lesson" value="">`:`<label>Chapter/Lesson</label><input id="li_lesson" value="${esc(l.lesson)}">`}
       <label>PDF 잠금 비번</label><input id="li_pdfpw" type="password" value="${esc(pdfPw)}" placeholder="잠긴 파일만. 풀어서 올라가요">
     </div>
     <div class="upload-box">
@@ -959,7 +1012,7 @@ function openLibItem(id){
     </div>
     <div class="hint">📎 파일을 고르면 바로 올라가요. 🔒 본시험지는 관리자 비번이 있어야만 열려요.</div>
     <div class="btns">
-      <button class="danger" onclick="deleteLib(${id})" style="margin-right:auto">레슨 삭제</button>
+      <button class="danger" onclick="deleteLib(${id})" style="margin-right:auto">${l.lesson===''?'교재 삭제':'레슨 삭제'}</button>
       <button onclick="openLibrary(${jsq(l.book)})">보관함</button>
       <button onclick="renameLib(${id})">이름 저장</button>
       <button onclick="closeModal()">닫기</button>
@@ -1006,14 +1059,14 @@ async function unlinkLibFile(id, kind){
 }
 async function renameLib(id){
   const book=$('li_book').value.trim(), lesson=$('li_lesson').value.trim();
-  if(!book || !lesson) return toast('교재와 레슨을 입력해 주세요', true);
+  if(!book || (!lesson && libById(id).lesson!=='')) return toast('교재와 레슨을 입력해 주세요', true);
   const { error } = await sb.rpc('exam_lib_rename', {p_pw:adminPw, p_lib:id, p_book:book, p_lesson:lesson});
   if(error) return toast('저장 실패: '+(/duplicate|unique/i.test(errMsg(error))?'같은 교재·레슨이 이미 있어요':errMsg(error)), true);
   toast('이름 저장 (연결된 신청 기록도 같이 바뀌어요)');
   await loadLibrary(); loadPapers(); openLibItem(id);
 }
 async function deleteLib(id){
-  if(!confirm('이 레슨을 보관함에서 삭제할까요? 신청 기록은 남고 시험지 연결만 끊겨요.')) return;
+  if(!confirm(`이 ${libById(id).lesson===''?'교재':'레슨'}을 보관함에서 삭제할까요? 신청 기록은 남고 시험지 연결만 끊겨요.`)) return;
   const book = libById(id).book;
   const { error } = await sb.rpc('exam_lib_delete', {p_pw:adminPw, p_lib:id});
   if(error) return toast('삭제 실패: '+errMsg(error), true);
@@ -1086,7 +1139,7 @@ function parseImport(text){
     const c=cells.slice(i).map(s=>(s||'').replace(/\u200b/g,'').trim());
     const [y,m,d]=c[0].split('-');
     const st = STATUSES.includes(c[7]) ? c[7] : '신청';
-    const lib = libFind(tab, c[3]||'', c[4]||'');
+    const lib = libFor(tab, c[3]||'', c[4]||'');
     out.push({category:tab, exam_date:`${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`, teacher:c[1]||'', level:c[2]||'', book:c[3]||'', lesson:c[4]||'', library_id: lib?lib.id:null, timeslot:c[5]||'', headcount:c[6]||'', status:st, note:c[8]||''});
   }
   return out;
