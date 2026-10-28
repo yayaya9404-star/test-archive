@@ -6,7 +6,7 @@
 <title>시험지 인쇄 관리</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@cantoo/pdf-lib@2.11.1/dist/pdf-lib.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 :root{
@@ -763,6 +763,7 @@ function openLibItem(id){
     <div class="form" style="margin-bottom:12px">
       <label>교재</label><input id="li_book" value="${esc(l.book)}">
       <label>Chapter/Lesson</label><input id="li_lesson" value="${esc(l.lesson)}">
+      <label>PDF 잠금 비번</label><input id="li_pdfpw" type="password" value="${esc(pdfPw)}" placeholder="잠긴 파일만. 풀어서 올라가요">
     </div>
     <div class="upload-box">
       <b>본시험지 ${l.main_file?'✅ 등록됨':'— 없음'}</b>
@@ -795,13 +796,34 @@ function openLibItem(id){
       <button onclick="closeModal()">닫기</button>
     </div>`, true);
 }
+// 잠긴 PDF면 비번으로 풀어서 올림 (비번은 이 창을 닫기 전까지만 기억)
+let pdfPw = '';
+async function unlockPdf(bytes){
+  const { PDFDocument } = PDFLib;
+  try{ await PDFDocument.load(bytes); return bytes; }                 // 안 잠긴 파일
+  catch(e){ if(!/encrypt/i.test(errMsg(e))) throw new Error('PDF를 읽을 수 없어요: '+errMsg(e)); }
+  const typed = ($('li_pdfpw') && $('li_pdfpw').value) || '';
+  for(const pw of [typed, pdfPw, '']){
+    try{
+      const src = await PDFDocument.load(bytes, { password: pw });
+      const out = await PDFDocument.create();
+      (await out.copyPages(src, src.getPageIndices())).forEach(p=>out.addPage(p));
+      if(pw) pdfPw = pw;
+      return await out.save();
+    }catch(e){}
+  }
+  throw new Error('잠긴 PDF예요. 위의 "PDF 잠금 비번" 칸에 비번을 넣고 다시 눌러주세요');
+}
 async function uploadLibFile(id, kind){
   const f = $(kind==='main'?'u_main':'u_retest').files[0];
   if(!f) return toast('PDF 파일을 선택해 주세요', true);
   if(f.type!=='application/pdf' && !/\.pdf$/i.test(f.name)) return toast('PDF만 등록할 수 있어요', true);
   if(f.size > 8*1024*1024) return toast('8MB 이하 PDF만 올릴 수 있어요', true);
+  let bytes;
+  try{ bytes = await unlockPdf(new Uint8Array(await f.arrayBuffer())); }
+  catch(e){ return toast(errMsg(e), true); }
   toast('올리는 중…');
-  const b64 = bytesToB64(await f.arrayBuffer());
+  const b64 = bytesToB64(bytes);
   const { error } = await sb.rpc('exam_lib_upload', {p_pw:adminPw, p_lib:id, p_kind:kind, p_name:f.name, p_b64:b64});
   if(error) return toast('업로드 실패: '+errMsg(error), true);
   toast(kind==='main'?'본시험지 등록 완료':'재시험지 등록 완료');
