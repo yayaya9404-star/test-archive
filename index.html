@@ -51,6 +51,12 @@ tr.today td{background:var(--today)}
 tr.done td{color:#9aa1ad}
 td.date{white-space:nowrap;font-variant-numeric:tabular-nums}
 td.c{text-align:center}
+.chip-c{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:500;white-space:nowrap;line-height:1.5}
+.color-row{display:flex;gap:6px;align-items:center;margin-bottom:5px}
+.color-row input[type=color]{flex:0 0 32px;width:32px;height:30px;padding:2px;border-radius:7px;cursor:pointer;background:#fff}
+.color-row input[type=text]{flex:1;min-width:0;padding:5px 8px;font-size:13px}
+.color-row .icon-btn{flex:0 0 auto}
+.color-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:18px}
 .badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;font-weight:500;white-space:nowrap}
 .st-신청{background:var(--blue-bg);color:var(--blue)}
 .st-인쇄중{background:var(--amber-bg);color:var(--amber)}
@@ -124,6 +130,7 @@ select:disabled{background:#f4f5f7;color:#9aa1ad}
     <span class="spacer"></span>
     <span id="adminTools" style="display:none;gap:6px">
       <button onclick="openLibrary()">📚 시험지 보관함</button>
+      <button onclick="openColors()">🎨 색 설정</button>
       <button onclick="openSemesters(currentSem()?currentSem().id:null)">학기 설정</button>
       <button onclick="openImport()">시트에서 붙여넣기</button>
       <button onclick="openChangePw()">비번 변경</button>
@@ -152,7 +159,7 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // ===================================================
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-const STATUSES = ['신청','인쇄중','준비완료','진행완료','오류'];
+const STATUSES = ['신청','일정변경','준비완료','진행완료'];
 const CAT_LABEL = {chat:'CHAT', munin:'문인시'};
 const BOOK_LABEL = {chat:'Story Book', munin:'문법교재'};
 
@@ -254,6 +261,68 @@ function comboLevel(a, b){ return [...new Set([...bookLevels('chat',a), ...bookL
 function libFor(cat, book, lesson){ return BOOK_ONLY(cat) ? bookRow(cat, book) : libFind(cat, book, lesson); }
 
 // ---------- 학기 ----------
+// ---------- 색 (담임·시간대·요청) ----------
+let colors = [];
+async function loadColors(){
+  const { data, error } = await sb.from('exam_colors').select('*').order('kind').order('sort_order');
+  if(error) return;               // 색 표가 아직 없으면 그냥 기본 모양
+  colors = data || []; render();
+}
+const normC = s => String(s||'').toLowerCase().replace(/\s+/g,'');
+// 'Christine양희수' → Christine 색, '월수금1부' → 월수금1 색 (앞부분이 같으면 같은 색, 가장 길게 맞는 것)
+function colorFor(kind, v){
+  const n = normC(v); if(!n) return null;
+  let best = null;
+  for(const c of colors) if(c.kind===kind){ const k = normC(c.name); if(k && n.startsWith(k) && (!best || k.length > normC(best.name).length)) best = c; }
+  return best ? best.color : null;
+}
+// 배경이 어두우면 흰 글씨
+function textOn(hex){ const m=/^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex||''); if(!m) return '#1d2330';
+  const [r,g,b]=[1,2,3].map(i=>parseInt(m[i],16)); return (r*299+g*587+b*114)/1000 < 150 ? '#fff' : '#1d2330'; }
+function chip(kind, v){ const c = colorFor(kind, v); return c && v ? `<span class="chip-c" style="background:${c};color:${textOn(c)}">${esc(v)}</span>` : esc(v); }
+
+// 색 설정 화면 (관리자)
+const COLOR_KINDS = [['teacher','담임'],['slot','시간대'],['status','요청']];
+const PALETTE = ['#fde9a6','#e6d3f5','#c6e0f5','#fbd0cf','#d4edbc','#c9dbe3','#fcc994','#fdf3a7','#f6a04d','#3d7ee8','#11734b','#b10202','#5b3c88','#0a53a8'];
+let cdraft = null;
+function openColors(){
+  cdraft = {}; COLOR_KINDS.forEach(([k])=>cdraft[k] = colors.filter(c=>c.kind===k).map(c=>({name:c.name, color:c.color})));
+  if(!cdraft.status.length) cdraft.status = STATUSES.map((n,i)=>({name:n, color:PALETTE[i]}));
+  renderColors();
+}
+function renderColors(){
+  showModal(`
+    <h2>🎨 색 설정</h2>
+    <div class="desc">목록에서 담임·시간대·요청 칸이 이 색으로 보여요. 이름 앞부분이 같으면 같은 색이에요 (예: <b>Christine</b> → 'Christine양희수'도 같은 색).</div>
+    <div class="color-cols">${COLOR_KINDS.map(([k,label])=>`<div>
+      <b style="font-size:14px">${label}</b>
+      <div style="margin-top:6px">${cdraft[k].map((c,i)=>`<div class="color-row">
+        <input type="color" value="${esc(c.color)}" oninput="cdraft.${k}[${i}].color=this.value;this.nextElementSibling.style.background=this.value;this.nextElementSibling.style.color=textOn(this.value)">
+        <input type="text" value="${esc(c.name)}" oninput="cdraft.${k}[${i}].name=this.value" style="background:${esc(c.color)};color:${textOn(c.color)}" ${k==='status'?'readonly':''}>
+        ${k==='status'?'':`<button class="icon-btn" style="margin:0" title="지우기" onclick="cdraft.${k}.splice(${i},1);renderColors()">🗑</button>`}
+      </div>`).join('')}</div>
+      ${k==='status'?'':`<div style="display:flex;gap:4px;margin-top:4px">
+        <button class="sm" onclick="addColor('${k}')">＋ 추가</button>
+        <button class="sm" onclick="fillColors('${k}')" title="반현황에 있는데 색이 없는 것 추가">반현황에서 채우기</button></div>`}
+    </div>`).join('')}</div>
+    <div class="btns"><button onclick="closeModal()">취소</button><button class="primary" onclick="saveColors()">저장</button></div>`, true);
+}
+function nextColor(k){ const used = new Set(cdraft[k].map(c=>c.color)); return PALETTE.find(c=>!used.has(c)) || PALETTE[cdraft[k].length % PALETTE.length]; }
+function addColor(k){ cdraft[k].push({name:'', color:nextColor(k)}); renderColors(); }
+function fillColors(k){
+  const src = [...new Set(classes.map(c=>k==='teacher'?c.teacher:c.timeslot).filter(Boolean))].sort();
+  let n = 0;
+  for(const v of src) if(!cdraft[k].some(c=>c.name && normC(v).startsWith(normC(c.name)))){ cdraft[k].push({name:v, color:nextColor(k)}); n++; }
+  renderColors(); toast(n ? `${n}개 추가했어요` : '빠진 게 없어요');
+}
+async function saveColors(){
+  const items = [];
+  COLOR_KINDS.forEach(([k])=>cdraft[k].forEach((c,i)=>{ if(c.name.trim()) items.push({kind:k, name:c.name.trim(), color:c.color, ord:i+1}); }));
+  const { error } = await sb.rpc('exam_save_colors', {p_pw:adminPw, p_items:items});
+  if(error) return toast('저장 실패: '+errMsg(error), true);
+  closeModal(); toast('색 저장'); loadColors();
+}
+
 async function loadSettings(){
   const [s, c, b] = await Promise.all([
     sb.from('exam_semesters').select('*').order('start_date',{ascending:false}),
@@ -316,9 +385,9 @@ function render(){
     act += `<button class="icon-btn" title="수정" onclick="openEdit(${p.id})">✏️</button>`;
     return `<tr class="${cls}">
       <td class="date">${esc(p.exam_date||'-')}</td>
-      <td>${esc(p.teacher)}</td><td>${esc(p.level)}</td><td>${esc(p.book)}</td>
-      <td>${esc(p.lesson)}</td><td>${esc(p.timeslot)}</td><td class="c">${esc(p.headcount)}</td>
-      <td><span class="badge st-${esc(p.status)}">${esc(p.status)}</span></td>
+      <td>${chip('teacher', p.teacher)}</td><td>${esc(p.level)}</td><td>${esc(p.book)}</td>
+      <td>${esc(p.lesson)}</td><td>${chip('slot', p.timeslot)}</td><td class="c">${esc(p.headcount)}</td>
+      <td>${colorFor('status', p.status) ? chip('status', p.status) : `<span class="badge st-${esc(p.status)}">${esc(p.status)}</span>`}</td>
       <td style="max-width:180px">${esc(p.note)}</td>
       <td>${lib ? `<span class="file ${lib.main_file?'has':''}">본</span><span class="file ${lib.retest_file?'has':''}">재</span>`
                 : `<span class="file" title="보관함 레슨과 연결되지 않았어요. ✏️에서 레슨을 다시 고르세요" style="color:var(--amber)">⚠ 미연결</span>`}</td>
@@ -348,7 +417,7 @@ function openEdit(id){
       <label>Chapter<br>/Lesson</label><span id="w_lesson"></span>
       <label>시간대</label><span id="w_slot"></span>
       <label>인원</label><input id="f_head" value="${esc(p.headcount||'')}" placeholder="예: 12+1">
-      <label>요청</label><select id="f_status">${STATUSES.map(s=>`<option ${s===p.status?'selected':''}>${s}</option>`).join('')}</select>
+      <label>요청</label><select id="f_status">${[...new Set([...STATUSES, p.status].filter(Boolean))].map(s=>`<option ${s===p.status?'selected':''}>${s}</option>`).join('')}</select>
       <label>기타 참조</label><input id="f_note" value="${esc(p.note||'')}">
     </div>
     <div class="btns">
@@ -1256,7 +1325,7 @@ async function doImport(){
 
 // ---------- 시작 ----------
 setTab('munin');
-loadSettings(); loadLibrary(); loadPapers();
+loadSettings(); loadLibrary(); loadPapers(); loadColors();
 setInterval(()=>{ if(!$('modalBg').classList.contains('show')) loadPapers(); }, 20000);
 </script>
 </body>
