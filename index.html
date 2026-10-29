@@ -246,6 +246,10 @@ function libFind(cat, book, lesson){ return lesson ? (library.find(l=>l.category
 // CHAT은 레슨 없이 교재(시험) 하나 = 시험지 하나. 문인시는 교재+챕터
 const BOOK_ONLY = cat => cat === 'chat';
 function bookRow(cat, book){ return book ? (library.find(l=>l.category===cat && l.book===book && l.lesson==='') || null) : null; }
+// 레벨 비교: 'LSA1(1-3개월)' → 'LSA1', 대소문자·띄어쓰기 무시
+const normLv = s => String(s||'').replace(/[\(\[（].*$/,'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+function bookLevels(cat, book){ const r = bookRow(cat, book); return r && r.level ? r.level.split(',').map(normLv).filter(Boolean) : []; }
+function comboLevel(a, b){ return [...new Set([...bookLevels('chat',a), ...bookLevels('chat',b)])].join(',') || null; }
 function libFor(cat, book, lesson){ return BOOK_ONLY(cat) ? bookRow(cat, book) : libFind(cat, book, lesson); }
 
 // ---------- 학기 ----------
@@ -355,6 +359,7 @@ function openEdit(id){
   buildLesson(p.lesson||'');
   buildLevel(p.level||'', !id);
   buildSlot(p.timeslot||'');
+  if(id && BOOK_ONLY(editCat)) buildBook(p.book||'');   // 수정 화면도 레벨 교재 목록으로 (기존 교재는 유지)
 }
 
 // --- 담임 → 레벨 → 시간대/교재 연동 ---
@@ -370,10 +375,19 @@ function pickHTML(id, options, value, onchg, noCustom){
     ${noCustom?'':'<option value="__c">직접 입력…</option>'}</select>`;
 }
 // 교재: 보관함 교재 + (문인시) 학기 레벨 교재
-function buildBook(value){
+function buildBook(value, showAll){
   let list = libBooks(editCat);
   if(editCat==='munin') list = [...new Set([...list, ...Object.values(semBooksFor())])].sort((a,b)=>a.localeCompare(b,'ko',{numeric:true}));
-  $('w_book').innerHTML = pickHTML('f_book', list, value, 'onBook()');
+  let note = '';
+  const lv = normLv(fval('f_level'));
+  if(BOOK_ONLY(editCat) && lv && !showAll){
+    const mine = list.filter(b=>bookLevels(editCat, b).includes(lv));
+    if(mine.length){
+      list = mine;                                            // (이미 골라둔 교재는 pickHTML이 맨 위에 남겨둠)
+      note = `<div class="hint" style="margin-top:3px">${esc(fval('f_level'))} 교재만 보여요 · <a href="#" onclick="buildBook(fval('f_book'),true);return false">전체 교재 보기</a></div>`;
+    }
+  }
+  $('w_book').innerHTML = pickHTML('f_book', list, value, 'onBook()') + note;
 }
 // Chapter/Lesson: 보관함에 등록된 레슨만 드롭다운 (철자가 항상 같아서 시험지와 정확히 연결됨)
 function buildLesson(value){
@@ -418,7 +432,14 @@ function buildSlot(value){
   else $('w_slot').innerHTML = pickHTML('f_slot', slots, value, '');                                  // 2개 이상이면 선택
 }
 function fillBook(){
-  if(editCat!=='munin') return;            // CHAT 스토리북은 매번 달라서 직접 입력
+  if(BOOK_ONLY(editCat)){
+    // CHAT: 레벨을 바꾸면 그 레벨 교재만. 다른 레벨 교재가 골라져 있었으면 비움
+    const b=fval('f_book'), lv=normLv(fval('f_level'));
+    const hasAny = libBooks(editCat).some(x=>bookLevels(editCat,x).includes(lv));
+    const keep = !b || !hasAny || bookLevels(editCat,b).includes(lv);
+    buildBook(keep?b:''); if(!keep) buildLesson('');
+    return;
+  }
   const b=semBooksFor()[fval('f_level')];
   if(b){ buildBook(b); buildLesson(''); }
 }
@@ -726,7 +747,7 @@ function openLibrary(book){
   : BOOK_ONLY(cat) ? `<div class="upload-box"><table class="sem-table">${books.map(b=>{
       const r = bookRow(cat, b);
       return `<tr>
-        <td>${esc(b)}</td>
+        <td>${r&&r.level?`<span class="file has" style="margin-right:6px">${esc(r.level)}</span>`:''}${esc(b)}</td>
         <td style="width:70px"><span class="file ${r&&r.main_file?'has':''}">본</span><span class="file ${r&&r.retest_file?'has':''}">재</span></td>
         <td style="text-align:right;width:60px"><button class="sm" onclick="openBookItem(${jsq(b)})">열기</button></td>
       </tr>`; }).join('')}</table>
@@ -784,14 +805,14 @@ function comboPrev(){ const n=comboName(); $('cb_prev').innerHTML = n ? `만들�
 async function saveCombo(){
   const n = comboName();
   if(!n) return toast('서로 다른 책 두 권을 골라주세요', true);
-  await openBookItem(n);
+  await openBookItem(n, comboLevel(fval('cb_a'), fval('cb_b')));
 }
 
 // CHAT 교재 열기 (자리표시 줄이 없던 교재면 만들고 열기)
-async function openBookItem(book){
+async function openBookItem(book, level){
   let r = bookRow(tab, book);
   if(!r){
-    const { error } = await sb.rpc('exam_lib_add_books', {p_pw:adminPw, p_category:tab, p_books:[book]});
+    const { error } = await sb.rpc('exam_lib_add_books', {p_pw:adminPw, p_category:tab, p_books:[book], p_levels:[level||null]});
     if(error) return toast('실패: '+errMsg(error), true);
     await loadLibrary(); r = bookRow(tab, book);
   }
@@ -824,23 +845,38 @@ function cleanBookTitle(s){
 function openAddBooks(){
   showModal(`
     <h2>📋 ${CAT_LABEL[tab]} 교재 여러 개 붙여넣기</h2>
-    <div class="desc">엑셀에서 교재 칸을 복사해서 붙여넣으세요. 앞의 레벨·번호(예: <b>DSC1_01.</b>)는 자동으로 떼고 제목만 올라가요.</div>
+    <div class="desc">엑셀에서 교재 칸을 복사해서 붙여넣으세요. 앞의 레벨·번호(예: <b>DSC1_01.</b>)는 떼고 제목만 올라가고, <b>레벨(DSC1)은 따로 저장</b>돼서 신청할 때 그 레벨 교재만 보여요.<br>이미 올린 교재도 다시 붙여넣으면 레벨만 채워져요.</div>
     <textarea id="ab_text" rows="10" oninput="previewBooks()" placeholder="DSC1_01.Goldilocks and the Three Bears&#10;DSC1_02.The Frog Prince"></textarea>
     <div class="hint" id="ab_prev"></div>
     <div class="btns"><button onclick="openLibrary()">뒤로</button><button class="primary" onclick="saveBooks()">올리기</button></div>`, true);
 }
-function bookList(){ return [...new Set($('ab_text').value.split(/\r?\n/).map(cleanBookTitle).filter(Boolean))]; }
+// 'DSC1_01.Goldilocks' → {book:'Goldilocks', level:'DSC1'}
+function bookItems(){
+  const out = new Map();
+  for(const line of $('ab_text').value.split(/\r?\n/)){
+    const raw = line.replace(/\u200b/g,'').trim(); if(!raw) continue;
+    const m = raw.match(/^([A-Za-z]{2,4}\d?)\s*_/);
+    const book = cleanBookTitle(raw); if(!book) continue;
+    const level = m ? m[1].toUpperCase() : (out.get(book)||{}).level || '';
+    out.set(book, { book, level });
+  }
+  return [...out.values()];
+}
+function bookList(){ return bookItems().map(x=>x.book); }
 function previewBooks(){
   const l = bookList(), have = new Set(libBooks(tab));
   const nw = l.filter(b=>!have.has(b));
-  $('ab_prev').innerHTML = l.length ? `${l.length}개 인식 · 새로 추가 ${nw.length}개<br>${l.slice(0,8).map(esc).join(' / ')}${l.length>8?' …':''}` : '';
+  const it = bookItems();
+  $('ab_prev').innerHTML = l.length ? `${l.length}개 인식 · 새로 추가 ${nw.length}개 · 레벨 있음 ${it.filter(x=>x.level).length}개<br>${it.slice(0,8).map(x=>esc(x.book)+(x.level?` <span class="file has">${esc(x.level)}</span>`:'')).join(' / ')}${l.length>8?' …':''}` : '';
 }
 async function saveBooks(){
   const l = bookList();
   if(!l.length) return toast('교재를 붙여넣어 주세요', true);
-  const { data, error } = await sb.rpc('exam_lib_add_books', {p_pw:adminPw, p_category:tab, p_books:l});
+  const items = bookItems();
+  const { data, error } = await sb.rpc('exam_lib_add_books', {p_pw:adminPw, p_category:tab, p_books:items.map(x=>x.book), p_levels:items.map(x=>x.level||null)});
   if(error) return toast('올리기 실패: '+errMsg(error), true);
-  toast(`교재 ${data}개 추가${data<l.length?' (이미 있는 건 건너뜀)':''}`);
+  const lv = items.filter(x=>x.level).length;
+  toast(`교재 ${l.length}개 저장${lv?` · 레벨 ${lv}개 연결`:''}`);
   await loadLibrary(); openLibrary('');
 }
 function fillLessonRange(){
@@ -987,8 +1023,9 @@ async function runBulk(){
   const rows = bulk.filter(bulkReady);
   if(BOOK_ONLY(tab)){
     // CHAT: 교재(시험) 자리 먼저 만들기 (이미 있으면 건너뜀)
+    const lvOf = {}; rows.forEach(r=>{ const n=bulkBookName(r); if(r.book==='__combo') lvOf[n]=comboLevel(r.ca, r.cb); });
     const names = [...new Set(rows.map(bulkBookName))];
-    const { error } = await sb.rpc('exam_lib_add_books', {p_pw:adminPw, p_category:tab, p_books:names});
+    const { error } = await sb.rpc('exam_lib_add_books', {p_pw:adminPw, p_category:tab, p_books:names, p_levels:names.map(n=>lvOf[n]||null)});
     if(error){ go.disabled=false; return toast('교재 만들기 실패: '+errMsg(error), true); }
     rows.forEach(r=>{ r.book = bulkBookName(r); });
   }
@@ -1026,7 +1063,9 @@ function openLibItem(id){
     <h2>시험지 등록</h2>
     <div class="form" style="margin-bottom:12px">
       <label>교재</label><input id="li_book" value="${esc(l.book)}">
-      ${l.lesson===''?`<input type="hidden" id="li_lesson" value="">`:`<label>Chapter/Lesson</label><input id="li_lesson" value="${esc(l.lesson)}">`}
+      ${l.lesson===''?`<input type="hidden" id="li_lesson" value="">
+        <label>레벨</label><div style="display:flex;gap:6px"><input id="li_level" value="${esc(l.level||'')}" placeholder="예: DSC1 (여러 개면 DSC1,DSC2)"><button class="sm" onclick="saveLevel(${id})">저장</button></div>`
+      :`<label>Chapter/Lesson</label><input id="li_lesson" value="${esc(l.lesson)}">`}
       <label>PDF 잠금 비번</label><input id="li_pdfpw" type="password" value="${esc(pdfPw)}" placeholder="잠긴 파일만. 풀어서 올라가요">
     </div>
     <div class="upload-box">
@@ -1096,6 +1135,11 @@ async function unlinkLibFile(id, kind){
   const { error } = await sb.rpc('exam_lib_remove_file', {p_pw:adminPw, p_lib:id, p_kind:kind});
   if(error) return toast('실패: '+errMsg(error), true);
   await loadLibrary(); openLibItem(id);
+}
+async function saveLevel(id){
+  const { error } = await sb.rpc('exam_lib_set_level', {p_pw:adminPw, p_lib:id, p_level:$('li_level').value});
+  if(error) return toast('저장 실패: '+errMsg(error), true);
+  toast('레벨 저장'); await loadLibrary(); openLibItem(id);
 }
 async function renameLib(id){
   const book=$('li_book').value.trim(), lesson=$('li_lesson').value.trim();
