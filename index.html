@@ -159,6 +159,7 @@ const BOOK_LABEL = {chat:'Story Book', munin:'문법교재'};
 let tab = 'munin';
 let papers = [];
 let adminPw = null;     // 확인된 관리자 비번 (새로고침하면 사라짐)
+let taPw = null;        // 확인된 조교 비번 (새로고침하면 사라짐)
 let sortAsc = true;
 let semesters = [], classes = [], levelBooks = [];
 let library = [];       // 시험지 보관함 (교재·레슨·본/재)
@@ -306,11 +307,12 @@ function render(){
     const copies = parseCopies(p.headcount);
     const lib = libById(p.library_id);
     let act = '';
-    if(lib && lib.retest_file) act += `<button class="sm" onclick="openRetest(${p.id})">재시 인쇄</button>`;
-    if(p.status==='준비완료') act += `<button class="sm" onclick="markDone(${p.id})">진행완료</button>`;
+    // 순서: 본시 인쇄(관리자) → 재시 인쇄 → 진행완료
     if(adminPw){
-      act += `<button class="sm primary" ${lib&&lib.main_file?'':'disabled title="보관함에 본시험지가 없어요"'} onclick="openPrint(${p.id})">🖨 인쇄${copies?` ${copies}부`:''}</button>`;
+      act += `<button class="sm primary" ${lib&&lib.main_file?'':'disabled title="보관함에 본시험지가 없어요"'} onclick="openPrint(${p.id})">🖨 본시${copies?` ${copies}부`:''}</button>`;
     }
+    if(lib && lib.retest_file) act += `<button class="sm" onclick="openRetest(${p.id})">🖨 재시</button>`;
+    if(p.status==='준비완료') act += `<button class="sm" onclick="markDone(${p.id})">진행완료</button>`;
     act += `<button class="icon-btn" title="수정" onclick="openEdit(${p.id})">✏️</button>`;
     return `<tr class="${cls}">
       <td class="date">${esc(p.exam_date||'-')}</td>
@@ -479,9 +481,11 @@ function openRetest(id){
   showModal(`
     <h2>재시험지 인쇄</h2>
     <div class="desc">${esc(p.exam_date)} · ${esc(p.teacher)} · ${esc(p.level)} · ${esc(p.book)}</div>
+    ${(taPw||adminPw)?'':`<div class="form" style="margin-bottom:10px"><label>🔒 조교 비번</label><input type="password" id="r_pw" placeholder="조교샘 비밀번호"></div>`}
     <textarea id="r_names" rows="8" placeholder="재시 대상자 이름을 한 줄에 한 명씩 (또는 쉼표로 구분)"></textarea>
     <div class="hint">이름이 시험지에 찍혀서 한 명당 한 부씩 인쇄창이 열려요. 인쇄창에서 용지 B5 · 양면을 확인하세요. <span id="r_count"></span></div>
     <div class="btns"><button onclick="closeModal()">취소</button><button class="primary" onclick="sendRetest(${id})">🖨 인쇄</button></div>`);
+  if($('r_pw')) $('r_pw').focus();
   const ta=$('r_names'); ta.oninput=()=>{ $('r_count').textContent = splitNames(ta.value).length ? `(${splitNames(ta.value).length}명)` : ''; };
 }
 function splitNames(t){ return t.split(/[\n,，]+/).map(s=>s.trim()).filter(Boolean); }
@@ -490,9 +494,15 @@ async function sendRetest(id){
   if(!names.length) return toast('이름을 입력해 주세요', true);
   const lib = libById(papers.find(x=>x.id===id).library_id);
   if(!lib || !lib.retest_file) return toast('보관함에 재시험지가 없어요', true);
+  const pw = taPw || adminPw || ($('r_pw') ? $('r_pw').value : '');
+  if(!pw) return toast('조교 비밀번호를 입력해 주세요', true);
   toast('재시험지 준비 중…');
-  const { data, error } = await sb.rpc('exam_get_retest', {p_lib:lib.id});
-  if(error) return toast('불러오기 실패: '+errMsg(error), true);
+  const { data, error } = await sb.rpc('exam_get_retest', {p_pw:pw, p_lib:lib.id});
+  if(error){
+    if(/비밀번호/.test(errMsg(error))){ taPw = null; if($('r_pw')) $('r_pw').value=''; return toast('조교 비밀번호가 틀렸어요', true); }
+    return toast('불러오기 실패: '+errMsg(error), true);
+  }
+  if(!adminPw) taPw = pw;          // 맞았으면 새로고침 전까지 다시 안 물어봄
   try{
     const pdf = await buildPdf(b64ToBytes(data), names, libPos(lib));
     closeModal(); printPdf(pdf);
@@ -522,8 +532,9 @@ function updateAdminUI(){
 }
 function openChangePw(){
   showModal(`
-    <h2>관리자 비밀번호 변경</h2>
+    <h2>비밀번호 변경</h2>
     <div class="form" style="margin-top:12px">
+      <label>바꿀 비번</label><select id="c_who"><option value="admin">관리자 비번 (본시험지·보관함)</option><option value="ta">조교 비번 (재시험지)</option></select>
       <label>새 비번</label><input type="password" id="c_new1">
       <label>한 번 더</label><input type="password" id="c_new2">
     </div>
@@ -532,9 +543,15 @@ function openChangePw(){
 async function changePw(){
   const a=$('c_new1').value, b=$('c_new2').value;
   if(a!==b) return toast('두 비밀번호가 달라요', true);
+  if(a.length < 4) return toast('4자 이상으로 해주세요', true);
+  if($('c_who').value==='ta'){
+    const { error } = await sb.rpc('exam_set_ta_pw', {p_admin_pw:adminPw, p_new:a});
+    if(error) return toast('변경 실패: '+errMsg(error), true);
+    taPw = null; closeModal(); toast('조교 비밀번호를 바꿨어요'); return;
+  }
   const { error } = await sb.rpc('exam_change_pw', {p_old:adminPw, p_new:a});
   if(error) return toast('변경 실패: '+errMsg(error), true);
-  adminPw=a; closeModal(); toast('비밀번호를 바꿨어요');
+  adminPw=a; closeModal(); toast('관리자 비밀번호를 바꿨어요');
 }
 
 // ---------- 학기 설정 (관리자) ----------
@@ -1089,7 +1106,7 @@ function openLibItem(id){
       </div>
       <div class="hint">B5 용지는 가로 182mm × 세로 257mm예요. 테스트 인쇄로 위치를 확인한 뒤 숫자를 조금씩 조정하세요.</div>
     </div>
-    <div class="hint">📎 파일을 고르면 바로 올라가요. 🔒 본시험지는 관리자 비번이 있어야만 열려요.</div>
+    <div class="hint">📎 파일을 고르면 바로 올라가요. 🔒 본시험지는 관리자 비번, 재시험지는 조교 비번이 있어야만 열려요.</div>
     <div class="btns">
       <button class="danger" onclick="deleteLib(${id})" style="margin-right:auto">${l.lesson===''?'교재 삭제':'레슨 삭제'}</button>
       <button onclick="openLibrary(${jsq(l.book)})">보관함</button>
@@ -1164,7 +1181,7 @@ async function saveNamePos(id){
 // 이름 위치 확인: '홍길동' 찍힌 재시험지 1부를 인쇄창으로
 async function testPrint(id){
   if(!(await saveNamePos(id))) return;
-  const { data, error } = await sb.rpc('exam_get_retest', {p_lib:id});
+  const { data, error } = await sb.rpc('exam_get_retest', {p_pw:adminPw, p_lib:id});
   if(error) return toast('불러오기 실패: '+errMsg(error), true);
   try{ printPdf(await buildPdf(b64ToBytes(data), ['홍길동'], libPos(libById(id)))); }
   catch(e){ toast('PDF 만들기 실패: '+errMsg(e), true); }
