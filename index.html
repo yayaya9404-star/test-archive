@@ -51,7 +51,7 @@ tr.today td{background:var(--today)}
 tr.done td{color:#9aa1ad}
 td.date{white-space:nowrap;font-variant-numeric:tabular-nums}
 td.c{text-align:center}
-.chip-c{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.chip-c{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:500;white-space:nowrap;line-height:1.5}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;flex:0 0 10px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.15)}
 .dot-sp{display:inline-block;width:10px;flex:0 0 10px}
 .dsel{position:relative}
@@ -262,10 +262,13 @@ function libLessons(cat, book){
   return library.filter(l=>l.category===cat && l.book===book && l.lesson!=='')   // 빈 레슨 = 교재 자리표시
     .sort((a,b)=>a.lesson.localeCompare(b.lesson, 'ko', {numeric:true, sensitivity:'base'}));
 }
-function libFind(cat, book, lesson){ return lesson ? (library.find(l=>l.category===cat && l.book===book && l.lesson===lesson) || null) : null; }
+const sameName = (a, b) => a === b || (normName(a) !== '' && normName(a) === normName(b));
+function libFind(cat, book, lesson){ return lesson ? (library.find(l=>l.category===cat && l.book===book && l.lesson===lesson)
+  || library.find(l=>l.category===cat && l.lesson!=='' && sameName(l.book, book) && sameName(l.lesson, lesson)) || null) : null; }
 // CHAT은 레슨 없이 교재(시험) 하나 = 시험지 하나. 문인시는 교재+챕터
 const BOOK_ONLY = cat => cat === 'chat';
-function bookRow(cat, book){ return book ? (library.find(l=>l.category===cat && l.book===book && l.lesson==='') || null) : null; }
+function bookRow(cat, book){ return book ? (library.find(l=>l.category===cat && l.book===book && l.lesson==='')
+  || library.find(l=>l.category===cat && l.lesson==='' && sameName(l.book, book)) || null) : null; }
 // 레벨 비교: 'LSA1(1-3개월)' → 'LSA1', 대소문자·띄어쓰기 무시
 const normLv = s => String(s||'').replace(/[\(\[（].*$/,'').toUpperCase().replace(/[^A-Z0-9]/g,'');
 function bookLevels(cat, book){ const r = bookRow(cat, book); return r && r.level ? r.level.split(',').map(normLv).filter(Boolean) : []; }
@@ -331,7 +334,7 @@ function slotKey(s){
   const r = DAY_ORDER.indexOf(m[1]); return [r<0 ? 50 : r, +m[2], String(s)];
 }
 function slotCmp(a, b){ const x = slotKey(a), y = slotKey(b); return x[0]-y[0] || x[1]-y[1] || x[2].localeCompare(y[2]); }
-function chip(kind, v){ const c = colorFor(kind, v); return c && v ? `<span class="chip-c"><span class="dot" style="background:${c}"></span>${esc(v)}</span>` : esc(v); }
+function chip(kind, v){ const c = colorFor(kind, v); return c && v ? `<span class="chip-c" style="background:${c};color:${textOn(c)}">${esc(v)}</span>` : esc(v); }
 
 // 색 설정 화면 (관리자)
 const COLOR_KINDS = [['teacher','담임'],['slot','시간대'],['status','요청']];
@@ -905,8 +908,9 @@ function openLibrary(book){
     return `<div class="upload-box">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
         <b style="margin:0">${esc(b)}</b>
-        <span class="hint" style="margin:0">${ls.length ? `본 ${done}/${ls.length} · 재 ${doneR}/${ls.length}` : '레슨 없음'}</span>
+        <span class="hint" style="margin:0">${ls.length ? `본 ${done}/${ls.length} · 재 ${doneR}/${ls.length}` : '시험지 없음'}</span>
         <span class="spacer"></span>
+        ${ls.length ? `<button class="sm" onclick="openRenameBook(${jsq(b)})">이름 바꾸기</button>` : ''}
         <button class="sm" onclick="openAddLessons(${jsq(b)})">＋ 레슨 추가</button>
       </div>
       ${ls.length ? `<table class="sem-table">${ls.map(l=>`<tr>
@@ -925,6 +929,7 @@ function openLibrary(book){
       ${BOOK_ONLY(cat)?`<button class="sm" onclick="openCombo()">🔗 두 권 묶어서 시험 만들기</button>`:''}
       <button class="sm" onclick="openAddBooks()">📋 교재 여러 개 붙여넣기</button>
       ${BOOK_ONLY(cat)?'':`<button class="sm" onclick="openAddLessons('')">＋ 교재 추가</button>`}
+      <button class="sm" onclick="relinkAll()" title="교재·레슨 이름이 보관함과 같은데 연결이 끊긴 신청을 다시 붙여요">끊긴 신청 다시 연결${unlinkedCount(cat)?` (${unlinkedCount(cat)})`:''}</button>
       <button class="primary sm" onclick="openBulk()">📤 여러 파일 한 번에 올리기</button>
     </div>
     ${body}
@@ -1288,7 +1293,44 @@ async function saveLevel(id){
   if(error) return toast('저장 실패: '+errMsg(error), true);
   toast('레벨 저장'); await loadLibrary(); openLibItem(id);
 }
+// ---------- 교재 이름 바꾸기 / 다시 연결 ----------
+function unlinkedCount(cat){ return papers.filter(p=>p.category===cat && !p.library_id && p.book).length; }
+function openRenameBook(book){
+  const sems = [...new Set(levelBooks.map(b=>b.book))].filter(b=>b!==book);
+  showModal(`
+    <h2>교재 이름 바꾸기</h2>
+    <div class="desc"><b>${esc(book)}</b>의 챕터·시험지를 모두 새 이름으로 옮겨요. 이 이름으로 신청된 기록과 학기 설정의 교재 이름도 같이 바뀌어요.<br>
+      새 이름이 이미 보관함에 있으면 하나로 합쳐요.</div>
+    <div class="form"><label>새 이름</label><input id="rb_new" list="rb_list" value="" placeholder="예: Pre Inter A-2"></div>
+    <datalist id="rb_list">${sems.map(b=>`<option value="${esc(b)}">`).join('')}</datalist>
+    ${sems.length?`<div class="hint">입력칸을 누르면 학기 설정에 있는 교재 이름이 보여요. 거기 쓴 이름과 똑같이 맞추면 돼요.</div>`:''}
+    <div class="btns"><button onclick="openLibrary()">뒤로</button><button class="primary" onclick="renameBook(${jsq(book)})">바꾸기</button></div>`);
+}
+async function renameBook(oldName, newName){
+  const nw = (newName !== undefined ? newName : $('rb_new').value).trim();
+  if(!nw) return toast('새 이름을 입력해 주세요', true);
+  const { data, error } = await sb.rpc('exam_lib_rename_book', {p_pw:adminPw, p_category:tab, p_old:oldName, p_new:nw});
+  if(error) return toast('바꾸기 실패: '+errMsg(error), true);
+  await Promise.all([loadLibrary(), loadPapers(), loadSettings()]);
+  toast(`'${nw}'(으)로 바꿨어요${data?` · 신청 ${data}건 다시 연결`:''}`);
+  if(newName === undefined) openLibrary(nw);
+  return true;
+}
+async function relinkAll(){
+  const { data, error } = await sb.rpc('exam_relink', {p_pw:adminPw});
+  if(error) return toast('실패: '+errMsg(error), true);
+  await loadPapers(); openLibrary();
+  const left = unlinkedCount(tab);
+  toast(`${data||0}건 다시 연결했어요${left?` · 아직 ${left}건은 이름이 달라서 못 붙였어요`:''}`, !!left);
+}
 async function renameLib(id){
+  // CHAT 교재(레슨 없음)는 교재 이름 바꾸기로
+  if(libById(id).lesson===''){
+    const book=$('li_book').value.trim(); if(!book) return toast('교재 이름을 입력해 주세요', true);
+    const old = libById(id).book;
+    if(await renameBook(old, book)){ const r = bookRow(tab, book); if(r) openLibItem(r.id); }
+    return;
+  }
   const book=$('li_book').value.trim(), lesson=$('li_lesson').value.trim();
   if(!book || (!lesson && libById(id).lesson!=='')) return toast('교재와 레슨을 입력해 주세요', true);
   const { error } = await sb.rpc('exam_lib_rename', {p_pw:adminPw, p_lib:id, p_book:book, p_lesson:lesson});
