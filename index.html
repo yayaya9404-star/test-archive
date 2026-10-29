@@ -66,7 +66,7 @@ td.c{text-align:center}
 .file{font-size:11px;padding:1px 6px;border-radius:4px;background:var(--gray-bg);color:#9aa1ad;margin-right:3px}
 .file.has{background:#e9e4ff;color:#5a3fd1}
 .actions{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
-.icon-btn{border:none;background:none;padding:2px 5px;font-size:13px;margin-left:auto;opacity:.6}
+.icon-btn{border:none;background:none;padding:2px 5px;font-size:13px;opacity:.6}
 .icon-btn:hover{background:var(--gray-bg);opacity:1}
 .chip{display:inline-block;margin:0 4px 4px 0}
 .bulk-table select,.bulk-table input{width:100%;padding:4px 6px;font-size:12px}
@@ -142,7 +142,7 @@ select:disabled{background:#f4f5f7;color:#9aa1ad}
       <thead><tr>
         <th class="sortable" onclick="toggleSort()">날짜 <span id="sortIcon">▲</span></th>
         <th>담임</th><th>레벨</th><th id="bookHead">문법교재</th><th>Lesson</th>
-        <th>시간대</th><th>인원</th><th>요청</th><th>기타 참조</th><th>시험지</th><th>작업</th>
+        <th>시간대</th><th>인원</th><th>요청</th><th>기타 참조</th><th>작업</th>
       </tr></thead>
       <tbody id="tbody"></tbody>
     </table>
@@ -279,6 +279,16 @@ function colorFor(kind, v){
 // 배경이 어두우면 흰 글씨
 function textOn(hex){ const m=/^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex||''); if(!m) return '#1d2330';
   const [r,g,b]=[1,2,3].map(i=>parseInt(m[i],16)); return (r*299+g*587+b*114)/1000 < 150 ? '#fff' : '#1d2330'; }
+// 드롭다운·입력칸에 색 입히기 (고른 값 색으로 칸 배경, 목록 항목마다 색)
+function paint(id, kind){
+  const el = $(id); if(!el) return;
+  const set = () => { const c = colorFor(kind, el.value); el.style.background = c || ''; el.style.color = c ? textOn(c) : ''; el.style.fontWeight = c ? '500' : ''; };
+  if(el.tagName === 'SELECT') [...el.options].forEach(o=>{
+    const c = o.value && o.value !== '__c' ? colorFor(kind, o.value) : null;
+    o.style.background = c || '#fff'; o.style.color = c ? textOn(c) : '#1d2330';
+  });
+  set(); el.addEventListener('change', set); el.addEventListener('input', set);
+}
 function chip(kind, v){ const c = colorFor(kind, v); return c && v ? `<span class="chip-c" style="background:${c};color:${textOn(c)}">${esc(v)}</span>` : esc(v); }
 
 // 색 설정 화면 (관리자)
@@ -369,28 +379,25 @@ function render(){
     return (a.teacher||'').localeCompare(b.teacher||'') || (a.timeslot||'').localeCompare(b.timeslot||'') || a.id-b.id;
   });
 
-  if(!rows.length){ $('tbody').innerHTML = `<tr><td colspan="11" class="empty">표시할 시험이 없어요</td></tr>`; return; }
+  if(!rows.length){ $('tbody').innerHTML = `<tr><td colspan="10" class="empty">표시할 시험이 없어요</td></tr>`; return; }
 
   $('tbody').innerHTML = rows.map(p=>{
     const cls = [p.exam_date===today?'today':'', p.status==='진행완료'?'done':''].join(' ');
     const copies = parseCopies(p.headcount);
     const lib = libById(p.library_id);
-    let act = '';
-    // 순서: 본시 인쇄(관리자) → 재시 인쇄 → 진행완료
+    // 순서: ✏️ → 본시 인쇄(관리자) → 재시 인쇄 → 진행완료
+    let act = `<button class="icon-btn" title="수정" onclick="openEdit(${p.id})">✏️</button>`;
     if(adminPw){
       act += `<button class="sm primary" ${lib&&lib.main_file?'':'disabled title="보관함에 본시험지가 없어요"'} onclick="openPrint(${p.id})">🖨 본시${copies?` ${copies}부`:''}</button>`;
     }
     if(lib && lib.retest_file) act += `<button class="sm" onclick="openRetest(${p.id})">🖨 재시</button>`;
     if(p.status==='준비완료') act += `<button class="sm" onclick="markDone(${p.id})">진행완료</button>`;
-    act += `<button class="icon-btn" title="수정" onclick="openEdit(${p.id})">✏️</button>`;
     return `<tr class="${cls}">
       <td class="date">${esc(p.exam_date||'-')}</td>
       <td>${chip('teacher', p.teacher)}</td><td>${esc(p.level)}</td><td>${esc(p.book)}</td>
-      <td>${esc(p.lesson)}</td><td>${chip('slot', p.timeslot)}</td><td class="c">${esc(p.headcount)}</td>
+      <td>${esc(p.lesson)}${adminPw && !lib ? ` <span title="보관함 시험지와 연결되지 않았어요. ✏️에서 교재·레슨을 다시 고르세요" style="color:var(--amber);cursor:help">⚠</span>` : ''}</td><td>${chip('slot', p.timeslot)}</td><td class="c">${esc(p.headcount)}</td>
       <td>${colorFor('status', p.status) ? chip('status', p.status) : `<span class="badge st-${esc(p.status)}">${esc(p.status)}</span>`}</td>
       <td style="max-width:180px">${esc(p.note)}</td>
-      <td>${lib ? `<span class="file ${lib.main_file?'has':''}">본</span><span class="file ${lib.retest_file?'has':''}">재</span>`
-                : `<span class="file" title="보관함 레슨과 연결되지 않았어요. ✏️에서 레슨을 다시 고르세요" style="color:var(--amber)">⚠ 미연결</span>`}</td>
       <td><div class="actions">${act}</div></td>
     </tr>`;
   }).join('');
@@ -431,6 +438,7 @@ function openEdit(id){
   buildLevel(p.level||'', !id);
   buildSlot(p.timeslot||'');
   if(id && BOOK_ONLY(editCat)) buildBook(p.book||'');   // 수정 화면도 레벨 교재 목록으로 (기존 교재는 유지)
+  paint('f_status', 'status');
 }
 
 // --- 담임 → 레벨 → 시간대/교재 연동 ---
@@ -480,12 +488,14 @@ function buildLesson(value){
   $('w_lesson').innerHTML = pickHTML('f_lesson', list, value, '', true);
 }
 function onBook(){ buildLesson(''); }
-function toCustom(id, onchg){ $(id).outerHTML=`<input id="${id}" onchange="${onchg}" placeholder="직접 입력">`; $(id).focus(); }
+function toCustom(id, onchg){ $(id).outerHTML=`<input id="${id}" onchange="${onchg}" placeholder="직접 입력">`; $(id).focus();
+  const k = {f_teacher:'teacher', f_slot:'slot'}[id]; if(k) paint(id, k); }
 function waitHTML(id, msg){ return `<select id="${id}" disabled><option value="">${msg}</option></select>`; }
 
 function buildTeacher(value){
   const list=[...new Set(semClassesFor().map(c=>c.teacher))].sort();
   $('w_teacher').innerHTML = pickHTML('f_teacher', list, value, 'onTeacher()');
+  paint('f_teacher', 'teacher');
 }
 function buildLevel(value, autoBook){
   const all=semClassesFor(), t=fval('f_teacher');
@@ -501,6 +511,7 @@ function buildSlot(value){
   if(all.length && !l && !value){ $('w_slot').innerHTML = waitHTML('f_slot','레벨 먼저 선택'); return; }
   if(slots.length===1) $('w_slot').innerHTML = `<input id="f_slot" value="${esc(value||slots[0])}">`;  // 1개면 자동기입
   else $('w_slot').innerHTML = pickHTML('f_slot', slots, value, '');                                  // 2개 이상이면 선택
+  paint('f_slot', 'slot');
 }
 function fillBook(){
   if(BOOK_ONLY(editCat)){
