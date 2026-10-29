@@ -51,7 +51,16 @@ tr.today td{background:var(--today)}
 tr.done td{color:#9aa1ad}
 td.date{white-space:nowrap;font-variant-numeric:tabular-nums}
 td.c{text-align:center}
-.chip-c{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:500;white-space:nowrap;line-height:1.5}
+.chip-c{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;flex:0 0 10px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.15)}
+.dot-sp{display:inline-block;width:10px;flex:0 0 10px}
+.dsel{position:relative}
+.dsel-btn{width:100%;display:flex;align-items:center;gap:8px;text-align:left;font-size:14px;padding:7px 9px;background:#fff}
+.dsel-btn .caret{margin-left:auto;color:var(--sub);font-size:11px}
+.dsel-list{position:absolute;left:0;right:0;top:calc(100% + 3px);background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 24px rgba(20,25,35,.14);max-height:260px;overflow:auto;z-index:30;padding:4px}
+.dsel-opt{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:6px;cursor:pointer;font-size:14px}
+.dsel-opt:hover{background:var(--gray-bg)}
+.dsel-opt.on{background:var(--blue-bg);font-weight:500}
 .color-row{display:flex;gap:6px;align-items:center;margin-bottom:5px}
 .color-row input[type=color]{flex:0 0 32px;width:32px;height:30px;padding:2px;border-radius:7px;cursor:pointer;background:#fff}
 .color-row input[type=text]{flex:1;min-width:0;padding:5px 8px;font-size:13px}
@@ -114,7 +123,10 @@ select:disabled{background:#f4f5f7;color:#9aa1ad}
   <h1>📄 시험지 인쇄 관리</h1>
   <span class="spacer"></span>
   <select id="semSel" onchange="setSem(this.value)" title="학기 선택"></select>
-  <button id="adminBtn" onclick="toggleAdmin()">🔒 관리자</button>
+  <select id="roleSel" onchange="pickRole(this.value)" title="누구로 쓰는지">
+    <option value="teacher">선생님</option><option value="ta">STaRT</option><option value="admin">관리자</option>
+  </select>
+  <button id="logoutBtn" style="display:none" onclick="logout()">나가기</button>
 </header>
 
 <main>
@@ -166,7 +178,7 @@ const BOOK_LABEL = {chat:'Story Book', munin:'문법교재'};
 let tab = 'munin';
 let papers = [];
 let adminPw = null;     // 확인된 관리자 비번 (새로고침하면 사라짐)
-let taPw = null;        // 확인된 조교 비번 (새로고침하면 사라짐)
+let taPw = null;        // 확인된 STaRT 비번 (새로고침하면 사라짐)
 let sortAsc = true;
 let semesters = [], classes = [], levelBooks = [];
 let library = [];       // 시험지 보관함 (교재·레슨·본/재)
@@ -280,16 +292,46 @@ function colorFor(kind, v){
 function textOn(hex){ const m=/^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex||''); if(!m) return '#1d2330';
   const [r,g,b]=[1,2,3].map(i=>parseInt(m[i],16)); return (r*299+g*587+b*114)/1000 < 150 ? '#fff' : '#1d2330'; }
 // 드롭다운·입력칸에 색 입히기 (고른 값 색으로 칸 배경, 목록 항목마다 색)
+function dot(kind, v){ const c = v ? colorFor(kind, v) : null; return c ? `<span class="dot" style="background:${c}"></span>` : `<span class="dot-sp"></span>`; }
+// 드롭다운·입력칸 앞에 색 점. 드롭다운은 점이 보이는 목록으로 바꿈 (값은 원래 select에 그대로)
 function paint(id, kind){
   const el = $(id); if(!el) return;
-  const set = () => { const c = colorFor(kind, el.value); el.style.background = c || ''; el.style.color = c ? textOn(c) : ''; el.style.fontWeight = c ? '500' : ''; };
-  if(el.tagName === 'SELECT') [...el.options].forEach(o=>{
-    const c = o.value && o.value !== '__c' ? colorFor(kind, o.value) : null;
-    o.style.background = c || '#fff'; o.style.color = c ? textOn(c) : '#1d2330';
-  });
-  set(); el.addEventListener('change', set); el.addEventListener('input', set);
+  if(el.tagName === 'SELECT') return dotSelect(el, kind);
+  // 입력칸: 왼쪽에 점 (배경 그림으로)
+  const set = () => { const c = colorFor(kind, el.value);
+    el.style.paddingLeft = c ? '26px' : '';
+    el.style.backgroundImage = c ? `radial-gradient(circle at 14px 50%, ${c} 0 5px, rgba(0,0,0,.15) 5px 5.8px, transparent 6.3px)` : ''; };
+  set(); el.addEventListener('input', set); el.addEventListener('change', set);
 }
-function chip(kind, v){ const c = colorFor(kind, v); return c && v ? `<span class="chip-c" style="background:${c};color:${textOn(c)}">${esc(v)}</span>` : esc(v); }
+function closeDsel(){ document.querySelectorAll('.dsel-list').forEach(x=>x.remove()); }
+document.addEventListener('click', closeDsel);
+function dotSelect(sel, kind){
+  sel.style.display = 'none';
+  const box = document.createElement('div'); box.className = 'dsel'; sel.after(box);
+  const draw = () => {
+    const o = sel.options[sel.selectedIndex];
+    box.innerHTML = `<button type="button" class="dsel-btn" ${sel.disabled?'disabled':''}>${dot(kind, sel.value)}<span>${esc(o ? o.textContent : '선택')}</span><span class="caret">▼</span></button>`;
+    box.firstChild.onclick = open;
+  };
+  const open = e => {
+    e.stopPropagation();
+    const was = box.querySelector('.dsel-list'); closeDsel(); if(was) return;
+    const list = document.createElement('div'); list.className = 'dsel-list';
+    list.innerHTML = [...sel.options].map((o,i)=>`<div class="dsel-opt ${i===sel.selectedIndex?'on':''}" data-i="${i}">${o.value && o.value!=='__c' ? dot(kind, o.value) : '<span class="dot-sp"></span>'}${esc(o.textContent)}</div>`).join('');
+    list.onclick = ev => { ev.stopPropagation(); const d = ev.target.closest('.dsel-opt'); if(!d) return;
+      sel.selectedIndex = +d.dataset.i; closeDsel(); draw(); sel.dispatchEvent(new Event('change', {bubbles:true})); };
+    box.appendChild(list);
+  };
+  draw();
+}
+const DAY_ORDER = ['월수금','월화수목금','월수','월금','수금','화목','월','화','수','목','금','토','일'];
+function slotKey(s){
+  const m = String(s||'').replace(/\s+/g,'').match(/^(\D*?)(\d+)/);
+  if(!m) return [99, 0, String(s||'')];
+  const r = DAY_ORDER.indexOf(m[1]); return [r<0 ? 50 : r, +m[2], String(s)];
+}
+function slotCmp(a, b){ const x = slotKey(a), y = slotKey(b); return x[0]-y[0] || x[1]-y[1] || x[2].localeCompare(y[2]); }
+function chip(kind, v){ const c = colorFor(kind, v); return c && v ? `<span class="chip-c"><span class="dot" style="background:${c}"></span>${esc(v)}</span>` : esc(v); }
 
 // 색 설정 화면 (관리자)
 const COLOR_KINDS = [['teacher','담임'],['slot','시간대'],['status','요청']];
@@ -307,8 +349,8 @@ function renderColors(){
     <div class="color-cols">${COLOR_KINDS.map(([k,label])=>`<div>
       <b style="font-size:14px">${label}</b>
       <div style="margin-top:6px">${cdraft[k].map((c,i)=>`<div class="color-row">
-        <input type="color" value="${esc(c.color)}" oninput="cdraft.${k}[${i}].color=this.value;this.nextElementSibling.style.background=this.value;this.nextElementSibling.style.color=textOn(this.value)">
-        <input type="text" value="${esc(c.name)}" oninput="cdraft.${k}[${i}].name=this.value" style="background:${esc(c.color)};color:${textOn(c.color)}" ${k==='status'?'readonly':''}>
+        <input type="color" value="${esc(c.color)}" oninput="cdraft.${k}[${i}].color=this.value">
+        <input type="text" value="${esc(c.name)}" oninput="cdraft.${k}[${i}].name=this.value" ${k==='status'?'readonly':''}>
         ${k==='status'?'':`<button class="icon-btn" style="margin:0" title="지우기" onclick="cdraft.${k}.splice(${i},1);renderColors()">🗑</button>`}
       </div>`).join('')}</div>
       ${k==='status'?'':`<div style="display:flex;gap:4px;margin-top:4px">
@@ -376,7 +418,7 @@ function render(){
   rows.sort((a,b)=>{
     const da=a.exam_date||'9999', db=b.exam_date||'9999';
     if(da!==db) return sortAsc ? da.localeCompare(db) : db.localeCompare(da);
-    return (a.teacher||'').localeCompare(b.teacher||'') || (a.timeslot||'').localeCompare(b.timeslot||'') || a.id-b.id;
+    return (a.teacher||'').localeCompare(b.teacher||'') || slotCmp(a.timeslot, b.timeslot) || a.id-b.id;
   });
 
   if(!rows.length){ $('tbody').innerHTML = `<tr><td colspan="10" class="empty">표시할 시험이 없어요</td></tr>`; return; }
@@ -390,7 +432,7 @@ function render(){
     if(adminPw){
       act += `<button class="sm primary" ${lib&&lib.main_file?'':'disabled title="보관함에 본시험지가 없어요"'} onclick="openPrint(${p.id})">🖨 본시${copies?` ${copies}부`:''}</button>`;
     }
-    if(lib && lib.retest_file) act += `<button class="sm" onclick="openRetest(${p.id})">🖨 재시</button>`;
+    if((taPw || adminPw) && lib && lib.retest_file) act += `<button class="sm" onclick="openRetest(${p.id})">🖨 재시</button>`;
     if(p.status==='준비완료') act += `<button class="sm" onclick="markDone(${p.id})">진행완료</button>`;
     return `<tr class="${cls}">
       <td class="date">${esc(p.exam_date||'-')}</td>
@@ -405,7 +447,7 @@ function render(){
 
 // ---------- 모달 ----------
 function showModal(html, wide){ const m=$('modal'); m.className='modal'+(wide?' wide':''); m.innerHTML=html; $('modalBg').classList.add('show'); const f=m.querySelector('input,textarea'); if(f) f.focus(); }
-function closeModal(){ $('modalBg').classList.remove('show'); }
+function closeModal(){ $('modalBg').classList.remove('show'); if($('roleSel')) $('roleSel').value = currentRole(); }
 document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeModal(); });
 
 // 신청/수정
@@ -488,7 +530,7 @@ function buildLesson(value){
   $('w_lesson').innerHTML = pickHTML('f_lesson', list, value, '', true);
 }
 function onBook(){ buildLesson(''); }
-function toCustom(id, onchg){ $(id).outerHTML=`<input id="${id}" onchange="${onchg}" placeholder="직접 입력">`; $(id).focus();
+function toCustom(id, onchg){ const nx = $(id).nextElementSibling; if(nx && nx.classList.contains('dsel')) nx.remove(); $(id).outerHTML=`<input id="${id}" onchange="${onchg}" placeholder="직접 입력">`; $(id).focus();
   const k = {f_teacher:'teacher', f_slot:'slot'}[id]; if(k) paint(id, k); }
 function waitHTML(id, msg){ return `<select id="${id}" disabled><option value="">${msg}</option></select>`; }
 
@@ -507,7 +549,7 @@ function buildLevel(value, autoBook){
 }
 function buildSlot(value){
   const all=semClassesFor(), t=fval('f_teacher'), l=fval('f_level');
-  const slots=[...new Set(all.filter(c=>c.teacher===t && c.level===l).map(c=>c.timeslot).filter(Boolean))];
+  const slots=[...new Set(all.filter(c=>c.teacher===t && c.level===l).map(c=>c.timeslot).filter(Boolean))].sort(slotCmp);
   if(all.length && !l && !value){ $('w_slot').innerHTML = waitHTML('f_slot','레벨 먼저 선택'); return; }
   if(slots.length===1) $('w_slot').innerHTML = `<input id="f_slot" value="${esc(value||slots[0])}">`;  // 1개면 자동기입
   else $('w_slot').innerHTML = pickHTML('f_slot', slots, value, '');                                  // 2개 이상이면 선택
@@ -555,17 +597,15 @@ async function deletePaper(id){
   closeModal(); toast('삭제했어요'); loadPapers();
 }
 
-// 재시험 명단 → 인쇄 (조교샘)
+// 재시험 명단 → 인쇄 (STaRT)
 function openRetest(id){
   const p = papers.find(x=>x.id===id);
   showModal(`
     <h2>재시험지 인쇄</h2>
     <div class="desc">${esc(p.exam_date)} · ${esc(p.teacher)} · ${esc(p.level)} · ${esc(p.book)}</div>
-    ${(taPw||adminPw)?'':`<div class="form" style="margin-bottom:10px"><label>🔒 조교 비번</label><input type="password" id="r_pw" placeholder="조교샘 비밀번호"></div>`}
     <textarea id="r_names" rows="8" placeholder="재시 대상자 이름을 한 줄에 한 명씩 (또는 쉼표로 구분)"></textarea>
     <div class="hint">이름이 시험지에 찍혀서 한 명당 한 부씩 인쇄창이 열려요. 인쇄창에서 용지 B5 · 양면을 확인하세요. <span id="r_count"></span></div>
     <div class="btns"><button onclick="closeModal()">취소</button><button class="primary" onclick="sendRetest(${id})">🖨 인쇄</button></div>`);
-  if($('r_pw')) $('r_pw').focus();
   const ta=$('r_names'); ta.oninput=()=>{ $('r_count').textContent = splitNames(ta.value).length ? `(${splitNames(ta.value).length}명)` : ''; };
 }
 function splitNames(t){ return t.split(/[\n,，]+/).map(s=>s.trim()).filter(Boolean); }
@@ -574,47 +614,56 @@ async function sendRetest(id){
   if(!names.length) return toast('이름을 입력해 주세요', true);
   const lib = libById(papers.find(x=>x.id===id).library_id);
   if(!lib || !lib.retest_file) return toast('보관함에 재시험지가 없어요', true);
-  const pw = taPw || adminPw || ($('r_pw') ? $('r_pw').value : '');
-  if(!pw) return toast('조교 비밀번호를 입력해 주세요', true);
+  const pw = taPw || adminPw;
+  if(!pw) return toast('오른쪽 위에서 STaRT로 들어와 주세요', true);
   toast('재시험지 준비 중…');
   const { data, error } = await sb.rpc('exam_get_retest', {p_pw:pw, p_lib:lib.id});
   if(error){
-    if(/비밀번호/.test(errMsg(error))){ taPw = null; if($('r_pw')) $('r_pw').value=''; return toast('조교 비밀번호가 틀렸어요', true); }
+    if(/비밀번호/.test(errMsg(error))){ logout(); return toast('비밀번호가 바뀌었어요. 다시 들어와 주세요', true); }
     return toast('불러오기 실패: '+errMsg(error), true);
   }
-  if(!adminPw) taPw = pw;          // 맞았으면 새로고침 전까지 다시 안 물어봄
   try{
     const pdf = await buildPdf(b64ToBytes(data), names, libPos(lib));
     closeModal(); printPdf(pdf);
   }catch(e){ toast('PDF 만들기 실패: '+errMsg(e), true); }
 }
 
-// ---------- 관리자 ----------
-function toggleAdmin(){
-  if(adminPw){ adminPw=null; updateAdminUI(); render(); toast('관리자 모드 해제'); return; }
+// ---------- 선생님 / STaRT / 관리자 ----------
+const ROLE_LABEL = {ta:'STaRT', admin:'관리자'};
+function currentRole(){ return adminPw ? 'admin' : taPw ? 'ta' : 'teacher'; }
+function pickRole(r){
+  if(r === currentRole()) return;
+  if(r === 'teacher') return logout();
   showModal(`
-    <h2>관리자 로그인</h2>
-    <div class="desc">본시험지 등록·인쇄는 관리자만 할 수 있어요</div>
-    <input type="password" id="a_pw" style="width:100%" placeholder="비밀번호" onkeydown="if(event.key==='Enter')adminLogin()">
-    <div class="btns"><button onclick="closeModal()">취소</button><button class="primary" onclick="adminLogin()">확인</button></div>`);
+    <h2>${ROLE_LABEL[r]} 로그인</h2>
+    <div class="desc">${r==='admin' ? '본시험지 인쇄·보관함·설정은 관리자만 할 수 있어요' : '재시험지 인쇄는 STaRT에서 할 수 있어요'}</div>
+    <input type="password" id="a_pw" style="width:100%" placeholder="${ROLE_LABEL[r]} 비밀번호" onkeydown="if(event.key==='Enter')roleLogin('${r}')">
+    <div class="btns"><button onclick="closeModal()">취소</button><button class="primary" onclick="roleLogin('${r}')">확인</button></div>`);
 }
-async function adminLogin(){
+async function roleLogin(r){
   const pw = $('a_pw').value;
-  const { data, error } = await sb.rpc('exam_check_admin', {p_pw:pw});
+  const { data, error } = await sb.rpc(r==='admin' ? 'exam_check_admin' : 'exam_check_ta', {p_pw:pw});
   if(error) return toast('서버 오류: '+errMsg(error)+' (SQL 설치를 확인하세요)', true);
   if(!data) return toast('비밀번호가 틀렸어요', true);
-  adminPw = pw; closeModal(); updateAdminUI(); render(); toast('관리자 모드');
+  adminPw = r==='admin' ? pw : null;
+  taPw    = r==='ta'    ? pw : null;
+  closeModal(); updateAdminUI(); render(); toast(`${ROLE_LABEL[r]}로 들어왔어요`);
+}
+function logout(){
+  adminPw = null; taPw = null; closeModal(); updateAdminUI(); render(); toast('선생님 화면으로 돌아왔어요');
 }
 function updateAdminUI(){
-  $('adminBtn').textContent = adminPw ? '🔓 관리자 (나가기)' : '🔒 관리자';
-  $('adminBtn').classList.toggle('admin-on', !!adminPw);
+  const r = currentRole();
+  $('roleSel').value = r;
+  $('roleSel').classList.toggle('admin-on', r !== 'teacher');
+  $('logoutBtn').style.display = r === 'teacher' ? 'none' : '';
   $('adminTools').style.display = adminPw ? 'flex' : 'none';
 }
 function openChangePw(){
   showModal(`
     <h2>비밀번호 변경</h2>
     <div class="form" style="margin-top:12px">
-      <label>바꿀 비번</label><select id="c_who"><option value="admin">관리자 비번 (본시험지·보관함)</option><option value="ta">조교 비번 (재시험지)</option></select>
+      <label>바꿀 비번</label><select id="c_who"><option value="admin">관리자 비번 (본시험지·보관함)</option><option value="ta">STaRT 비번 (재시험지)</option></select>
       <label>새 비번</label><input type="password" id="c_new1">
       <label>한 번 더</label><input type="password" id="c_new2">
     </div>
@@ -627,7 +676,7 @@ async function changePw(){
   if($('c_who').value==='ta'){
     const { error } = await sb.rpc('exam_set_ta_pw', {p_admin_pw:adminPw, p_new:a});
     if(error) return toast('변경 실패: '+errMsg(error), true);
-    taPw = null; closeModal(); toast('조교 비밀번호를 바꿨어요'); return;
+    closeModal(); toast('STaRT 비밀번호를 바꿨어요'); return;
   }
   const { error } = await sb.rpc('exam_change_pw', {p_old:adminPw, p_new:a});
   if(error) return toast('변경 실패: '+errMsg(error), true);
@@ -697,6 +746,7 @@ function renderSemModal(){
 
     <div class="btns">
       ${d.id?`<button class="danger" onclick="deleteSemester(${d.id})" style="margin-right:auto">학기 삭제</button>`:''}
+      <button onclick="openColors()" title="새로 온 선생님 색 추가, 그만둔 선생님 색 지우기">선생님 색 정하기</button>
       <button onclick="closeModal()">닫기</button>
       <button class="primary" onclick="saveSemester()">저장</button>
     </div>`, true);
@@ -1186,7 +1236,7 @@ function openLibItem(id){
       </div>
       <div class="hint">B5 용지는 가로 182mm × 세로 257mm예요. 테스트 인쇄로 위치를 확인한 뒤 숫자를 조금씩 조정하세요.</div>
     </div>
-    <div class="hint">📎 파일을 고르면 바로 올라가요. 🔒 본시험지는 관리자 비번, 재시험지는 조교 비번이 있어야만 열려요.</div>
+    <div class="hint">📎 파일을 고르면 바로 올라가요. 🔒 본시험지는 관리자 비번, 재시험지는 STaRT 비번이 있어야만 열려요.</div>
     <div class="btns">
       <button class="danger" onclick="deleteLib(${id})" style="margin-right:auto">${l.lesson===''?'교재 삭제':'레슨 삭제'}</button>
       <button onclick="openLibrary(${jsq(l.book)})">보관함</button>
